@@ -16,7 +16,8 @@ test("approval is exact-run bound and rejects replay", () => {
   const receipt = createApprovalReceipt(fields, now);
   const raw = Buffer.from(JSON.stringify(receipt));
   const signature = sign(null, raw, privateKey);
-  assert.equal(verifyApprovalReceipt(raw, signature, publicKey, { callerRunId: "123", callerRunAttempt: "1", releaseEnvelopeSha256: "d".repeat(64) }, now).approvedBy, "reviewer");
+  assert.equal(verifyApprovalReceipt(raw, signature, publicKey, { callerRunId: "123", callerRunAttempt: "1", releaseEnvelopeSha256: "d".repeat(64), triggeringActor: "reviewer" }, now).approvedBy, "reviewer");
   assert.throws(() => verifyApprovalReceipt(raw, signature, publicKey, { callerRunId: "124" }, now), /binding mismatch/);
+  assert.throws(() => verifyApprovalReceipt(raw, signature, publicKey, { triggeringActor: "attacker" }, now), /binding mismatch/);
   assert.throws(() => verifyApprovalReceipt(raw, signature, publicKey, { callerRunId: "123" }, new Date("2026-08-30T13:00:00Z")), /validity window/);
 });

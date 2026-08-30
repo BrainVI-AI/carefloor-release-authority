@@ -69,7 +69,9 @@ async function sourceApproval(repository, sourceSha, token) {
   for (const review of reviews) if (review.user?.login) latest.set(review.user.login, review.state);
   const reviewers = [...latest].filter(([login, state]) => state === "APPROVED" && login !== pr.user?.login).map(([login]) => login).sort();
   if (!reviewers.length) throw new Error("Release source lacks an independent approved pull-request review");
-  return { initiatedBy: pr.user.login, approvedBy: required("GITHUB_ACTOR"), codeReviewers: reviewers, approvalReference: pr.html_url };
+  const approvedBy = required("GITHUB_ACTOR");
+  if (!reviewers.includes(approvedBy)) throw new Error("Workflow dispatcher must be an approved source reviewer");
+  return { initiatedBy: pr.user.login, approvedBy, codeReviewers: reviewers, approvalReference: pr.html_url };
 }
 
 function expectedEvidence() {
@@ -149,6 +151,7 @@ async function promote() {
     callerWorkflowSha: required("GITHUB_WORKFLOW_SHA"),
     callerRunId: required("GITHUB_RUN_ID"),
     callerRunAttempt: required("GITHUB_RUN_ATTEMPT"),
+    triggeringActor: required("GITHUB_TRIGGERING_ACTOR"),
   });
   const orgId = required("VERCEL_ORG_ID");
   const projectId = required("VERCEL_PROJECT_ID");
