@@ -3,86 +3,92 @@ name: Approve Carefloor
 on:
   workflow_call:
     inputs:
-      source_sha:
-        required: true
-        type: string
-      candidate_sha256:
-        required: true
-        type: string
-      approval_reference:
-        required: true
-        type: string
-      initiated_by:
-        required: true
-        type: string
+      source_sha: { required: true, type: string }
+      candidate_sha256: { required: true, type: string }
+      artifact_sha256: { required: true, type: string }
+      envelope_sha256: { required: true, type: string }
+      deployment_url: { required: true, type: string }
     outputs:
-      receipt_base64:
-        value: ${{ jobs.approve.outputs.receipt_base64 }}
-      signature_base64:
-        value: ${{ jobs.approve.outputs.signature_base64 }}
-      public_key_pem_base64:
-        value: ${{ jobs.approve.outputs.public_key_pem_base64 }}
-      public_key_sha256:
-        value: ${{ jobs.approve.outputs.public_key_sha256 }}
-      authority_id:
-        value: ${{ jobs.approve.outputs.authority_id }}
+      receipt_base64: { value: "${{ jobs.approve.outputs.receipt_base64 }}" }
+      signature_base64: { value: "${{ jobs.approve.outputs.signature_base64 }}" }
+      approved_by: { value: "${{ jobs.approve.outputs.approved_by }}" }
+      approval_sha256: { value: "${{ jobs.approve.outputs.approval_sha256 }}" }
 
 permissions:
+  actions: read
+  attestations: read
   contents: read
+  id-token: write
+  pull-requests: read
 
 jobs:
   approve:
     environment: carefloor-production-approval
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     outputs:
       receipt_base64: ${{ steps.sign.outputs.receipt_base64 }}
       signature_base64: ${{ steps.sign.outputs.signature_base64 }}
-      public_key_pem_base64: ${{ steps.sign.outputs.public_key_pem_base64 }}
-      public_key_sha256: ${{ steps.sign.outputs.public_key_sha256 }}
-      authority_id: ${{ steps.sign.outputs.authority_id }}
+      approved_by: ${{ steps.sign.outputs.approved_by }}
+      approval_sha256: ${{ steps.sign.outputs.approval_sha256 }}
     steps:
-      - name: Sign exact candidate approval
+      - name: Resolve immutable authority workflow identity
+        id: authority
+        env:
+          TOKEN_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
+          TOKEN_REQUEST: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
+        run: |
+          node <<'JS'
+          const fs = require("node:fs");
+          (async () => {
+            const response = await fetch(`${process.env.TOKEN_URL}&audience=carefloor-release-authority`, { headers: { Authorization: `Bearer ${process.env.TOKEN_REQUEST}` } });
+            if (!response.ok) throw new Error(`OIDC identity unavailable: ${response.status}`);
+            const { value } = await response.json();
+            const claims = JSON.parse(Buffer.from(value.split(".")[1], "base64url"));
+            if (!/^BrainVI-AI\/carefloor-release-authority\/.github\/workflows\/approve-carefloor\.yml@/.test(claims.job_workflow_ref) || !/^[a-f0-9]{40}$/.test(claims.job_workflow_sha)) throw new Error("Untrusted authority workflow identity");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `ref=${claims.job_workflow_ref}\nsha=${claims.job_workflow_sha}\n`);
+          })().catch((error) => { console.error(error.message); process.exit(1); });
+          JS
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: BrainVI-AI/carefloor-release-authority
+          ref: ${{ steps.authority.outputs.sha }}
+          path: authority-source
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: carefloor-validated-${{ inputs.source_sha }}
+          path: authority/evidence
+      - name: Verify caller-built evidence provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test "$GITHUB_REPOSITORY" = BrainVI-AI/brainvi-monorepo
+          gh attestation verify authority/evidence/candidate.json \
+            --repo BrainVI-AI/brainvi-monorepo \
+            --source-digest "${{ inputs.source_sha }}" \
+            --source-ref refs/heads/main \
+            --signer-workflow BrainVI-AI/brainvi-monorepo/.github/workflows/carefloor-production-release.yml \
+            --deny-self-hosted-runners \
+            --predicate-type https://slsa.dev/provenance/v1
+      - name: Validate evidence and sign exact-run approval
         id: sign
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
           CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
-          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
-          INITIATED_BY: ${{ inputs.initiated_by }}
-          AUTHORITY_ID: ${{ vars.CAREFLOOR_RELEASE_APPROVAL_AUTHORITY_ID }}
+          ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+          ENVELOPE_SHA256: ${{ inputs.envelope_sha256 }}
+          DEPLOYMENT_URL: ${{ inputs.deployment_url }}
+          EVIDENCE_DIR: authority/evidence
+          AUTHORITY_WORKFLOW_REF: ${{ steps.authority.outputs.ref }}
+          AUTHORITY_WORKFLOW_SHA: ${{ steps.authority.outputs.sha }}
           EXPECTED_PUBLIC_KEY_SHA256: ${{ vars.CAREFLOOR_RELEASE_APPROVAL_PUBLIC_KEY_SHA256 }}
           PRIVATE_KEY_PEM: ${{ secrets.CAREFLOOR_RELEASE_APPROVAL_PRIVATE_KEY_PEM }}
-        run: |
-          node <<'JS'
-          const fs = require("node:fs");
-          const { createHash, createPrivateKey, createPublicKey, sign } = require("node:crypto");
-          const hex = (value, length) => new RegExp(`^[a-f0-9]{${length}}$`).test(value ?? "");
-          const id = /^[A-Za-z0-9][A-Za-z0-9._@/-]{1,127}$/;
-          const reference = /^[A-Za-z0-9][A-Za-z0-9._:/-]{5,127}$/;
-          if (process.env.GITHUB_REPOSITORY !== "BrainVI-AI/brainvi-monorepo") throw new Error("Untrusted Carefloor approval caller");
-          if (!hex(process.env.SOURCE_SHA, 40) || !hex(process.env.CANDIDATE_SHA256, 64) || !reference.test(process.env.APPROVAL_REFERENCE ?? "") || !id.test(process.env.INITIATED_BY ?? "") || !id.test(process.env.AUTHORITY_ID ?? "") || process.env.INITIATED_BY === process.env.AUTHORITY_ID) throw new Error("Invalid Carefloor approval identity");
-          const privateKey = createPrivateKey(process.env.PRIVATE_KEY_PEM);
-          if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Invalid Carefloor approval key");
-          const publicKey = createPublicKey(privateKey);
-          const publicDer = publicKey.export({ type: "spki", format: "der" });
-          const publicKeySha256 = createHash("sha256").update(publicDer).digest("hex");
-          if (publicKeySha256 !== process.env.EXPECTED_PUBLIC_KEY_SHA256) throw new Error("Carefloor approval trust root mismatch");
-          const approvedAt = new Date();
-          const receipt = JSON.stringify({
-            schema: "brainvi.carefloor.release-approval.v1",
-            sourceSha: process.env.SOURCE_SHA,
-            candidateManifestSha256: process.env.CANDIDATE_SHA256,
-            approvalReference: process.env.APPROVAL_REFERENCE,
-            approvedBy: process.env.AUTHORITY_ID,
-            approvedAt: approvedAt.toISOString(),
-            expiresAt: new Date(approvedAt.getTime() + 30 * 60_000).toISOString(),
-          });
-          const values = {
-            receipt_base64: Buffer.from(receipt).toString("base64"),
-            signature_base64: sign(null, Buffer.from(receipt), privateKey).toString("base64"),
-            public_key_pem_base64: Buffer.from(publicKey.export({ type: "spki", format: "pem" })).toString("base64"),
-            public_key_sha256: publicKeySha256,
-            authority_id: process.env.AUTHORITY_ID,
-          };
-          fs.appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(values).map(([key, value]) => `${key}=${value}`).join("\n") + "\n");
-          JS
+          GH_TOKEN: ${{ github.token }}
+        run: node authority-source/scripts/release-authority.mjs approve
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: carefloor-approval-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            authority/approval-receipt.json
+            authority/approval-signature.base64
+          retention-days: 90
