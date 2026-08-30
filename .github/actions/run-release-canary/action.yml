@@ -7,6 +7,6 @@ outputs:
   transaction-path:
     description: Absolute path to the release transaction receipt.
   cost-path:
-    description: Absolute path to the exact-zero Jackson capacity receipt.
+    description: Absolute path to the exact-zero MARY, T1, and Jackson capacity receipt.
   ga-validation-path:
     description: Absolute path to the runtime GA evidence validation receipt.

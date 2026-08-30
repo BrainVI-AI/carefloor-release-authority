@@ -45,7 +45,7 @@ const runpodRequest = async (fetcher, controlKey, method, path, body) =>
     "RunPod management request",
   );
 
-const endpointFromInventory = (inventory, endpointId) => {
+const endpointFromInventory = (inventory, endpointId, label) => {
   const endpoints = Array.isArray(inventory)
     ? inventory
     : inventory?.items ?? inventory?.data ?? inventory?.endpoints;
@@ -53,22 +53,22 @@ const endpointFromInventory = (inventory, endpointId) => {
     throw new Error("RunPod endpoint inventory is invalid");
   const endpoint = endpoints.find(({ id }) => id === endpointId);
   if (!endpoint || !String(endpoint.name ?? "").toLowerCase().includes("carefloor"))
-    throw new Error("Jackson endpoint is not Carefloor-owned");
+    throw new Error(`${label} endpoint is not Carefloor-owned`);
   return endpoint;
 };
 
 const assertCapacity = (endpoint, workersMax, label) => {
   if (endpoint.workersMin !== 0 || endpoint.workersMax !== workersMax)
-    throw new Error(`Jackson ${label} boundary is invalid`);
+    throw new Error(`${label} boundary is invalid`);
 };
 
-async function verifyExactZero(fetcher, controlKey, endpointId, inferenceKey, wait) {
+async function verifyExactZero(fetcher, controlKey, lane, wait) {
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const endpoint = await runpodRequest(fetcher, controlKey, "GET", `endpoints/${endpointId}`);
-    assertCapacity(endpoint, 0, "teardown");
+    const endpoint = await runpodRequest(fetcher, controlKey, "GET", `endpoints/${lane.endpointId}`);
+    assertCapacity(endpoint, 0, `${lane.label} teardown`);
     const health = await readJson(
-      await fetcher(`https://api.runpod.ai/v2/${endpointId}/health`, {
-        headers: { authorization: `Bearer ${inferenceKey}` },
+      await fetcher(`https://api.runpod.ai/v2/${lane.endpointId}/health`, {
+        headers: { authorization: `Bearer ${lane.inferenceKey}` },
         cache: "no-store",
         redirect: "error",
         signal: AbortSignal.timeout(30_000),
@@ -85,7 +85,7 @@ async function verifyExactZero(fetcher, controlKey, endpointId, inferenceKey, wa
     ) return;
     if (attempt < 29) await wait(2_000);
   }
-  throw new Error("Jackson capacity did not return to exact zero");
+  throw new Error(`${lane.label} capacity did not return to exact zero`);
 }
 
 export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms))) {
@@ -94,17 +94,36 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
     throw new Error("Carefloor release deployment URL is invalid");
   const sourceSha = required(environment, "CAREFLOOR_RELEASE_SOURCE_SHA");
   const candidateManifestSha256 = required(environment, "WATCHFLOOR_CANDIDATE_MANIFEST_SHA256");
-  const endpointId = required(environment, "CAREFLOOR_JACKSON_RUNPOD_ENDPOINT_ID");
-  const expectedImage = required(environment, "CAREFLOOR_JACKSON_RUNPOD_IMAGE");
-  const expectedConfigurationSha256 = required(
-    environment,
-    "CAREFLOOR_JACKSON_RUNPOD_CONFIGURATION_SHA256",
-  );
   const controlKey = required(environment, "CAREFLOOR_RUNPOD_CONTROL_API_KEY");
-  const inferenceKey = required(environment, "CAREFLOOR_JACKSON_RUNPOD_API_KEY");
+  const lanes = [
+    {
+      label: "MARY",
+      endpointId: required(environment, "CAREFLOOR_RUNPOD_ENDPOINT_ID"),
+      inferenceKey: required(environment, "CAREFLOOR_RUNPOD_API_KEY"),
+      expectedImage: required(environment, "CAREFLOOR_RUNPOD_IMAGE"),
+      expectedConfigurationSha256: required(environment, "CAREFLOOR_RUNPOD_CONFIGURATION_SHA256"),
+      imagePattern: /^ghcr\.io\/brainvi-ai\/brainvi-watchfloor-perception@sha256:[a-f0-9]{64}$/,
+    },
+    {
+      label: "Jackson",
+      endpointId: required(environment, "CAREFLOOR_JACKSON_RUNPOD_ENDPOINT_ID"),
+      inferenceKey: required(environment, "CAREFLOOR_JACKSON_RUNPOD_API_KEY"),
+      expectedImage: required(environment, "CAREFLOOR_JACKSON_RUNPOD_IMAGE"),
+      expectedConfigurationSha256: required(environment, "CAREFLOOR_JACKSON_RUNPOD_CONFIGURATION_SHA256"),
+      imagePattern: /^ghcr\.io\/brainvi-ai\/brainvi-carefloor-jackson@sha256:[a-f0-9]{64}$/,
+    },
+    {
+      label: "T1",
+      endpointId: required(environment, "CAREFLOOR_T1_RUNPOD_ENDPOINT_ID"),
+      inferenceKey: required(environment, "CAREFLOOR_T1_RUNPOD_API_KEY"),
+      expectedImage: required(environment, "CAREFLOOR_T1_RUNPOD_IMAGE"),
+      expectedConfigurationSha256: required(environment, "CAREFLOOR_T1_RUNPOD_CONFIGURATION_SHA256"),
+      imagePattern: /^ghcr\.io\/brainvi-ai\/brainvi-watchfloor-t1@sha256:[a-f0-9]{64}$/,
+    },
+  ];
   const canarySecret = required(environment, "CAREFLOOR_RELEASE_CANARY_SECRET");
   const maxCostUsd = Number(required(environment, "CAREFLOOR_RELEASE_CANARY_MAX_COST_USD"));
-  if (!GIT_SHA.test(sourceSha) || !SHA256.test(candidateManifestSha256) || !SHA256.test(expectedConfigurationSha256) || !SAFE_ID.test(endpointId) || !/^ghcr\.io\/brainvi-ai\/brainvi-carefloor-jackson@sha256:[a-f0-9]{64}$/.test(expectedImage) || canarySecret.length < 32 || controlKey === inferenceKey || !Number.isFinite(maxCostUsd) || maxCostUsd <= 0 || maxCostUsd > 1)
+  if (!GIT_SHA.test(sourceSha) || !SHA256.test(candidateManifestSha256) || canarySecret.length < 32 || lanes.some(({ endpointId, inferenceKey, expectedImage, expectedConfigurationSha256, imagePattern }) => !SAFE_ID.test(endpointId) || !SHA256.test(expectedConfigurationSha256) || !imagePattern.test(expectedImage) || controlKey === inferenceKey) || new Set(lanes.map(({ endpointId }) => endpointId)).size !== lanes.length || new Set(lanes.map(({ inferenceKey }) => inferenceKey)).size !== lanes.length || !Number.isFinite(maxCostUsd) || maxCostUsd <= 0 || maxCostUsd > 1)
     throw new Error("Carefloor release canary binding is invalid");
 
   const version = await readJson(
@@ -121,38 +140,26 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
   if (version?.gitHead !== sourceSha || version?.candidateManifestSha256 !== candidateManifestSha256)
     throw new Error("Carefloor deployed candidate binding mismatch");
 
-  const standby = endpointFromInventory(
-    await runpodRequest(fetcher, controlKey, "GET", "endpoints"),
-    endpointId,
-  );
-  assertCapacity(standby, 0, "standby");
-  if (!SAFE_ID.test(standby.templateId ?? ""))
-    throw new Error("Jackson template binding is invalid");
-  const template = await runpodRequest(
-    fetcher,
-    controlKey,
-    "GET",
-    `templates/${standby.templateId}`,
-  );
-  if (
-    template?.imageName !== expectedImage ||
-    runpodConfigurationSha256(standby, template) !== expectedConfigurationSha256
-  ) throw new Error("Jackson release configuration drifted after admission");
+  const inventory = await runpodRequest(fetcher, controlKey, "GET", "endpoints");
+  for (const lane of lanes) {
+    const standby = endpointFromInventory(inventory, lane.endpointId, lane.label);
+    assertCapacity(standby, 0, `${lane.label} standby`);
+    if (!SAFE_ID.test(standby.templateId ?? ""))
+      throw new Error(`${lane.label} template binding is invalid`);
+    const template = await runpodRequest(fetcher, controlKey, "GET", `templates/${standby.templateId}`);
+    if (template?.imageName !== lane.expectedImage || runpodConfigurationSha256(standby, template) !== lane.expectedConfigurationSha256)
+      throw new Error(`${lane.label} release configuration drifted after admission`);
+  }
   const startedAt = new Date();
-  let opened = false;
+  const opened = [];
   let result;
   let failure;
   try {
-    await runpodRequest(fetcher, controlKey, "PATCH", `endpoints/${endpointId}`, {
-      workersMin: 0,
-      workersMax: 1,
-    });
-    opened = true;
-    assertCapacity(
-      await runpodRequest(fetcher, controlKey, "GET", `endpoints/${endpointId}`),
-      1,
-      "bounded canary",
-    );
+    for (const lane of lanes) {
+      await runpodRequest(fetcher, controlKey, "PATCH", `endpoints/${lane.endpointId}`, { workersMin: 0, workersMax: 1 });
+      opened.push(lane);
+      assertCapacity(await runpodRequest(fetcher, controlKey, "GET", `endpoints/${lane.endpointId}`), 1, `${lane.label} bounded canary`);
+    }
     result = await readJson(
       await fetcher(new URL("/api/internal/carefloor-release-canary", deploymentUrl), {
         method: "POST",
@@ -177,23 +184,23 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
   } catch (error) {
     failure = error;
   } finally {
-    if (opened) {
+    for (const lane of opened.reverse()) {
       try {
         await readJson(
-          await fetcher(`https://api.runpod.ai/v2/${endpointId}/purge-queue`, {
+          await fetcher(`https://api.runpod.ai/v2/${lane.endpointId}/purge-queue`, {
             method: "POST",
-            headers: { authorization: `Bearer ${inferenceKey}` },
+            headers: { authorization: `Bearer ${lane.inferenceKey}` },
             cache: "no-store",
             redirect: "error",
             signal: AbortSignal.timeout(30_000),
           }),
           "RunPod queue purge",
         );
-        await runpodRequest(fetcher, controlKey, "PATCH", `endpoints/${endpointId}`, {
+        await runpodRequest(fetcher, controlKey, "PATCH", `endpoints/${lane.endpointId}`, {
           workersMin: 0,
           workersMax: 0,
         });
-        await verifyExactZero(fetcher, controlKey, endpointId, inferenceKey, wait);
+        await verifyExactZero(fetcher, controlKey, lane, wait);
       } catch (error) {
         failure = failure ?? error;
       }
@@ -204,7 +211,7 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
     ...result,
     cost: {
       schema: "brainvi.carefloor.runpod-canary-cost.v1",
-      endpointId,
+      endpoints: lanes.map(({ label, endpointId }) => ({ label, endpointId })),
       sourceSha,
       startedAt: startedAt.toISOString(),
       completedAt: new Date().toISOString(),
