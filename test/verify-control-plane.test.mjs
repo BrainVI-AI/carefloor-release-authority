@@ -124,3 +124,24 @@ test("admits only the exact zero-capacity control plane", async () => {
     /runtime boundary is invalid/,
   );
 });
+
+test("rejects an inference key that can manage the RunPod account", async () => {
+  const fixture = controlPlaneFixture();
+  Object.assign(fixture.environment, {
+    CAREFLOOR_RUNPOD_API_KEY: "mary-inference",
+    CAREFLOOR_JACKSON_RUNPOD_API_KEY: "jackson-inference",
+  });
+  const fetcher = async (url, init) => {
+    const parsed = new URL(url);
+    if (parsed.origin === "https://api.runpod.ai") return Response.json({ idle: 1 });
+    if (
+      parsed.origin === "https://rest.runpod.io" &&
+      init?.headers?.authorization !== "Bearer runpod-key"
+    ) return Response.json([]);
+    return fixture.fetcher(url, init);
+  };
+  await assert.rejects(
+    verifyControlPlane(fixture.environment, fetcher),
+    /management authority/,
+  );
+});

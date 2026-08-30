@@ -255,6 +255,39 @@ export async function verifyControlPlane(environment, fetcher = fetch, now = new
     }));
   }
   const historyRetentionSeconds = await verifyNeon(environment, fetcher);
+  const inferenceKeys = {
+    mary: environment.CAREFLOOR_RUNPOD_API_KEY?.trim(),
+    t1: environment.CAREFLOOR_T1_RUNPOD_API_KEY?.trim(),
+    jackson: environment.CAREFLOOR_JACKSON_RUNPOD_API_KEY?.trim(),
+  };
+  if (Object.values(inferenceKeys).some(Boolean)) {
+    const bindings = runpod.map(({ kind, endpointId }) => [
+      inferenceKeys[kind],
+      endpointId,
+    ]);
+    if (
+      bindings.some(([key]) => !key || key === controlKey) ||
+      new Set(bindings.map(([key]) => key)).size !== bindings.length
+    ) throw new Error("Carefloor RunPod inference credentials are not isolated");
+    for (const [key, endpointId] of bindings) {
+      const headers = { authorization: `Bearer ${key}` };
+      const health = await fetcher(`https://api.runpod.ai/v2/${endpointId}/health`, {
+        headers,
+        cache: "no-store",
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!health.ok) throw new Error("Carefloor RunPod inference credential cannot invoke its endpoint");
+      const management = await fetcher("https://rest.runpod.io/v1/endpoints", {
+        headers,
+        cache: "no-store",
+        redirect: "error",
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (![401, 403].includes(management.status))
+        throw new Error("Carefloor RunPod inference credential has management authority");
+    }
+  }
   return Object.freeze({
     schema: "brainvi.carefloor.control-plane-release.v1",
     sourceSha,
