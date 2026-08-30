@@ -50,6 +50,38 @@ export function createPreflightReceipt(fields, now = new Date()) {
   };
 }
 
+export function validateMigrationEvidence(root, expected) {
+  for (const [key, length] of [["sourceSha", 40], ["candidateManifestSha256", 64], ["vercelArtifactSha256", 64], ["migrationAuthorizationSha256", 64]]) if (!hex(expected[key], length)) throw new Error(`Invalid ${key}`);
+  const file = path.join(root, "pre-migration.json");
+  if (fileSha256(file) !== expected.migrationAuthorizationSha256) throw new Error("Migration authorization hash mismatch");
+  const evidence = JSON.parse(fs.readFileSync(file, "utf8"));
+  if (evidence.schema !== "brainvi.carefloor.pre-migration.v1" || evidence.sourceSha !== expected.sourceSha || evidence.candidateManifestSha256 !== expected.candidateManifestSha256 || evidence.vercelArtifactSha256 !== expected.vercelArtifactSha256 || evidence.deploymentUrl !== expected.deploymentUrl) throw new Error("Migration authorization identity mismatch");
+  return evidence;
+}
+
+export function createMigrationReceipt(fields, now = new Date()) {
+  return {
+    schema: "brainvi.carefloor.migration-authorization.v1",
+    ...fields,
+    nonce: `${fields.callerRunId}:${fields.callerRunAttempt}:${fields.migrationAuthorizationSha256}`,
+    authorizedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 30 * 60_000).toISOString(),
+  };
+}
+
+export function verifyMigrationReceipt(raw, signature, publicKey, expected, now = new Date()) {
+  if (!verify(null, raw, publicKey, signature)) throw new Error("Migration authorization signature is invalid");
+  const receipt = JSON.parse(raw);
+  if (receipt.schema !== "brainvi.carefloor.migration-authorization.v1") throw new Error("Unsupported migration authorization schema");
+  for (const [field, value] of Object.entries(expected)) if (String(receipt[field]) !== String(value)) throw new Error(`Migration authorization binding mismatch: ${field}`);
+  if (receipt.nonce !== `${receipt.callerRunId}:${receipt.callerRunAttempt}:${receipt.migrationAuthorizationSha256}`) throw new Error("Migration authorization nonce mismatch");
+  const authorizedAt = Date.parse(receipt.authorizedAt);
+  const expiresAt = Date.parse(receipt.expiresAt);
+  if (!Number.isFinite(authorizedAt) || !Number.isFinite(expiresAt) || expiresAt - authorizedAt !== 30 * 60_000 || now.getTime() < authorizedAt - 60_000 || now.getTime() > expiresAt) throw new Error("Migration authorization is outside its validity window");
+  if (!receipt.approvedBy || receipt.approvedBy === receipt.initiatedBy || !Array.isArray(receipt.codeReviewers) || !receipt.codeReviewers.length) throw new Error("Migration authorization lacks independent human review");
+  return receipt;
+}
+
 export function verifyPreflightReceipt(raw, signature, publicKey, expected, now = new Date()) {
   if (!verify(null, raw, publicKey, signature)) throw new Error("Release preflight signature is invalid");
   const receipt = JSON.parse(raw);
@@ -196,6 +228,32 @@ async function preflight() {
   fs.appendFileSync(required("GITHUB_OUTPUT"), Object.entries(values).map(([key, value]) => `${key}=${value}`).join("\n") + "\n");
 }
 
+async function migration() {
+  if (required("GITHUB_REPOSITORY") !== "BrainVI-AI/brainvi-monorepo" || required("GITHUB_EVENT_NAME") !== "workflow_dispatch" || required("GITHUB_REF") !== "refs/heads/main") throw new Error("Untrusted Carefloor migration caller");
+  const evidence = {
+    sourceSha: required("SOURCE_SHA"),
+    candidateManifestSha256: required("CANDIDATE_SHA256"),
+    vercelArtifactSha256: required("ARTIFACT_SHA256"),
+    migrationAuthorizationSha256: required("MIGRATION_AUTHORIZATION_SHA256"),
+    deploymentUrl: new URL(required("DEPLOYMENT_URL")).href.replace(/\/$/, ""),
+  };
+  validateMigrationEvidence(required("EVIDENCE_DIR"), evidence);
+  const source = await sourceApproval(process.env.GITHUB_REPOSITORY, evidence.sourceSha, required("GH_TOKEN"));
+  const approvals = await request(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${required("GITHUB_RUN_ID")}/approvals`, { token: process.env.GH_TOKEN });
+  const approvedBy = environmentApprover(approvals, "carefloor-production-approval", source.initiatedBy);
+  const privateKey = createPrivateKey(required("PRIVATE_KEY_PEM"));
+  if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Invalid migration authorization key");
+  const publicKey = createPublicKey(privateKey);
+  const publicKeySha256 = sha256(publicKey.export({ type: "spki", format: "der" }));
+  if (publicKeySha256 !== required("EXPECTED_PUBLIC_KEY_SHA256")) throw new Error("Migration authorization trust root mismatch");
+  const receipt = createMigrationReceipt({ ...evidence, ...source, approvedBy, triggeringActor: required("GITHUB_TRIGGERING_ACTOR"), callerRepository: process.env.GITHUB_REPOSITORY, callerWorkflowRef: required("GITHUB_WORKFLOW_REF"), callerWorkflowSha: required("GITHUB_WORKFLOW_SHA"), callerRunId: required("GITHUB_RUN_ID"), callerRunAttempt: required("GITHUB_RUN_ATTEMPT"), authorityWorkflowRef: required("AUTHORITY_WORKFLOW_REF"), authorityWorkflowSha: required("AUTHORITY_WORKFLOW_SHA") });
+  const raw = Buffer.from(JSON.stringify(receipt));
+  const values = { receipt_base64: raw.toString("base64"), signature_base64: sign(null, raw, privateKey).toString("base64"), public_key_pem_base64: Buffer.from(publicKey.export({ type: "spki", format: "pem" })).toString("base64"), approved_by: receipt.approvedBy };
+  writeJson("authority/migration-authorization-receipt.json", receipt);
+  fs.writeFileSync("authority/migration-authorization-signature.base64", values.signature_base64 + "\n");
+  fs.appendFileSync(required("GITHUB_OUTPUT"), Object.entries(values).map(([key, value]) => `${key}=${value}`).join("\n") + "\n");
+}
+
 async function vercelRequest(url, init = {}) {
   return request(url, { ...init, token: required("VERCEL_TOKEN"), headers: { "Content-Type": "application/json", ...(init.headers ?? {}) } });
 }
@@ -283,5 +341,5 @@ async function rollback() {
 
 if (process.argv[1] === new URL(import.meta.url).pathname) {
   const command = process.argv[2];
-  ({ approve, preflight, consume, promote, rollback }[command]?.() ?? Promise.reject(new Error("Usage: release-authority.mjs approve|preflight|consume|promote|rollback"))).catch((error) => { console.error(error.message); process.exitCode = 1; });
+  ({ approve, preflight, migration, consume, promote, rollback }[command]?.() ?? Promise.reject(new Error("Usage: release-authority.mjs approve|preflight|migration|consume|promote|rollback"))).catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

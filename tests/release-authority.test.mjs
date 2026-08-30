@@ -4,7 +4,7 @@ import test from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { approvedReviewers, createApprovalReceipt, createPreflightReceipt, environmentApprover, validateEvidence, verifyApprovalReceipt, verifyPreflightReceipt } from "../scripts/release-authority.mjs";
+import { approvedReviewers, createApprovalReceipt, createMigrationReceipt, createPreflightReceipt, environmentApprover, validateEvidence, validateMigrationEvidence, verifyApprovalReceipt, verifyMigrationReceipt, verifyPreflightReceipt } from "../scripts/release-authority.mjs";
 
 const { privateKey, publicKey } = generateKeyPairSync("ed25519");
 const fields = {
@@ -52,6 +52,29 @@ test("preflight workflow delegates review validation to immutable authority code
   assert.match(workflow, /actions: read/);
   assert.match(workflow, /CAREFLOOR_RELEASE_APPROVAL_PUBLIC_KEY_SHA256/);
   assert.doesNotMatch(workflow, /test "\$AUTHOR" != "\$GITHUB_ACTOR"/);
+});
+
+test("migration authorization is exact-stage and exact-run bound", () => {
+  const now = new Date("2026-08-30T12:00:00Z");
+  const receipt = createMigrationReceipt({ ...fields, migrationAuthorizationSha256: "9".repeat(64) }, now);
+  const raw = Buffer.from(JSON.stringify(receipt));
+  const signature = sign(null, raw, privateKey);
+  assert.equal(verifyMigrationReceipt(raw, signature, publicKey, { migrationAuthorizationSha256: "9".repeat(64), callerRunId: "123" }, now).approvedBy, "reviewer");
+  assert.throws(() => verifyMigrationReceipt(raw, signature, publicKey, { migrationAuthorizationSha256: "8".repeat(64) }, now), /binding mismatch/);
+});
+
+test("migration evidence binds the staged deployment before mutation", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "carefloor-migration-"));
+  const evidence = { schema: "brainvi.carefloor.pre-migration.v1", sourceSha: fields.sourceSha, candidateManifestSha256: fields.candidateManifestSha256, vercelArtifactSha256: fields.vercelArtifactSha256, deploymentUrl: fields.deploymentUrl };
+  const raw = JSON.stringify(evidence);
+  fs.writeFileSync(path.join(root, "pre-migration.json"), raw);
+  const expected = { ...evidence, migrationAuthorizationSha256: createHash("sha256").update(raw).digest("hex") };
+  assert.equal(validateMigrationEvidence(root, expected).deploymentUrl, fields.deploymentUrl);
+  assert.throws(() => validateMigrationEvidence(root, { ...expected, deploymentUrl: "https://other.vercel.app" }), /identity mismatch/);
+  const workflow = fs.readFileSync(new URL("../.github/workflows/authorize-carefloor-migration.yml", import.meta.url), "utf8");
+  assert.match(workflow, /carefloor-staged-/);
+  assert.match(workflow, /gh attestation verify/);
+  assert.match(workflow, /release-authority\.mjs migration/);
 });
 
 test("rollback marker precedes the production mutation and approval is consumed first", () => {
