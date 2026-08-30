@@ -58,3 +58,13 @@ test("evidence validation rejects a mutated source receipt", () => {
   fs.writeFileSync(path.join(root, "migration.json"), "tampered");
   assert.throws(() => validateEvidence(root, expected), /migrationReceiptSha256/);
 });
+
+test("worker evidence is verified and signed only by the release authority", () => {
+  const workflow = fs.readFileSync(
+    new URL("../.github/workflows/authorize-carefloor-worker.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(workflow, /gh attestation verify/);
+  assert.match(workflow, /CAREFLOOR_WORKER_ATTESTATION_PRIVATE_KEY_PEM/);
+  assert.match(workflow, /evidence_signature_base64/);
+});
