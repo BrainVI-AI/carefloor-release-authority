@@ -1,4 +1,5 @@
 import { appendFile, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -151,6 +152,7 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
       throw new Error(`${lane.label} release configuration drifted after admission`);
   }
   const startedAt = new Date();
+  const releaseCanaryNonce = randomBytes(32).toString("hex");
   const opened = [];
   let result;
   let failure;
@@ -170,17 +172,52 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
             ? { "x-vercel-protection-bypass": environment.VERCEL_AUTOMATION_BYPASS_SECRET }
             : {}),
         },
-        body: JSON.stringify({ sourceSha, candidateManifestSha256 }),
+        body: JSON.stringify({ sourceSha, candidateManifestSha256, releaseCanaryNonce }),
         cache: "no-store",
         redirect: "error",
         signal: AbortSignal.timeout(300_000),
       }),
       "Carefloor release canary",
     );
+    const transaction = result?.transaction;
+    const ga = result?.gaOperationsValidation;
     if (
-      result?.transaction?.schema !== "brainvi.carefloor.release-transaction.v1" ||
-      result?.gaOperationsValidation?.schema !== "brainvi.carefloor.ga-release-validation.v1"
+      transaction?.schema !== "brainvi.carefloor.release-transaction.v1" ||
+      transaction.sourceSha !== sourceSha ||
+      transaction.candidateManifestSha256 !== candidateManifestSha256 ||
+      transaction.releaseCanaryNonce !== releaseCanaryNonce ||
+      transaction.maryState !== "source_bound_admitted" ||
+      transaction.t1State !== "source_bound_provisional" ||
+      transaction.queryState !== "jackson_verified" ||
+      transaction.dispatchState !== "confirmed" ||
+      transaction.fhirState !== "confirmed" ||
+      transaction.documentationState !== "clinical_assessment_complete" ||
+      !SAFE_ID.test(transaction.maryJobId ?? "") ||
+      ![transaction.maryRequestSha256, transaction.maryOutputSha256, transaction.jacksonReceiptId, transaction.fhirTransactionSha256].every((value) => SHA256.test(value ?? "")) ||
+      !Array.isArray(transaction.maryModelReleaseIds) ||
+      transaction.maryModelReleaseIds.length < 6 ||
+      ga?.schema !== "brainvi.carefloor.ga-release-validation.v1" ||
+      ga.sourceSha !== sourceSha ||
+      ga.candidateManifestSha256 !== candidateManifestSha256 ||
+      ga.releaseCanaryNonce !== releaseCanaryNonce ||
+      ![ga.modelEvidenceSha256, ga.gaOperationsEvidenceSha256].every((value) => SHA256.test(value ?? "")) ||
+      ![ga.tenantId, ga.siteId, ga.intendedUseId].every((value) => SAFE_ID.test(value ?? "")) ||
+      !Number.isFinite(Date.parse(transaction.completedAt ?? "")) ||
+      Date.parse(transaction.completedAt) < startedAt.getTime() ||
+      Date.parse(transaction.completedAt) > Date.now() + 60_000
     ) throw new Error("Carefloor release canary receipt is invalid");
+    const mary = lanes.find(({ label }) => label === "MARY");
+    const maryJob = await readJson(
+      await fetcher(`https://api.runpod.ai/v2/${mary.endpointId}/status/${transaction.maryJobId}`, {
+        headers: { authorization: `Bearer ${mary.inferenceKey}` },
+        cache: "no-store",
+        redirect: "error",
+        signal: AbortSignal.timeout(30_000),
+      }),
+      "MARY canary job",
+    );
+    if (maryJob?.id !== transaction.maryJobId || maryJob?.status !== "COMPLETED")
+      throw new Error("MARY canary job custody is invalid");
   } catch (error) {
     failure = error;
   } finally {

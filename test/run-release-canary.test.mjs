@@ -65,7 +65,7 @@ const environment = () => ({
   RUNNER_TEMP: "/tmp",
 });
 
-function fixture({ canaryStatus = 200 } = {}) {
+function fixture({ canaryStatus = 200, invalidReceipt = false } = {}) {
   const endpoints = [structuredClone(maryEndpoint), structuredClone(jacksonEndpoint), structuredClone(t1Endpoint)];
   const calls = [];
   const fetcher = async (input, init = {}) => {
@@ -81,6 +81,7 @@ function fixture({ canaryStatus = 200 } = {}) {
       if (init.method === "PATCH") Object.assign(endpoint, JSON.parse(init.body));
       return Response.json(endpoint);
     }
+    if (url.pathname.endsWith("/status/mary-job")) return Response.json({ id: "mary-job", status: "COMPLETED" });
     if (url.pathname.endsWith("/purge-queue")) return Response.json({ status: "completed" });
     if (url.pathname.endsWith("/health"))
       return Response.json({ workers: { idle: 0, running: 0 }, jobs: { inQueue: 0, inProgress: 0 } });
@@ -89,14 +90,48 @@ function fixture({ canaryStatus = 200 } = {}) {
         gitHead: "a".repeat(40),
         candidateManifestSha256: "b".repeat(64),
       });
-    if (url.pathname === "/api/internal/carefloor-release-canary")
+    if (url.pathname === "/api/internal/carefloor-release-canary") {
+      const request = JSON.parse(init.body);
       return Response.json(
         {
-          transaction: { schema: "brainvi.carefloor.release-transaction.v1" },
-          gaOperationsValidation: { schema: "brainvi.carefloor.ga-release-validation.v1" },
+          transaction: {
+            schema: "brainvi.carefloor.release-transaction.v1",
+            ...(invalidReceipt
+              ? {}
+              : {
+                  sourceSha: "a".repeat(40),
+                  candidateManifestSha256: "b".repeat(64),
+                  releaseCanaryNonce: request.releaseCanaryNonce,
+                  maryState: "source_bound_admitted",
+                  t1State: "source_bound_provisional",
+                  queryState: "jackson_verified",
+                  dispatchState: "confirmed",
+                  fhirState: "confirmed",
+                  documentationState: "clinical_assessment_complete",
+                  maryJobId: "mary-job",
+                  maryRequestSha256: "1".repeat(64),
+                  maryOutputSha256: "2".repeat(64),
+                  jacksonReceiptId: "3".repeat(64),
+                  fhirTransactionSha256: "4".repeat(64),
+                  maryModelReleaseIds: ["a", "b", "c", "d", "e", "f"],
+                  completedAt: new Date().toISOString(),
+                }),
+          },
+          gaOperationsValidation: {
+            schema: "brainvi.carefloor.ga-release-validation.v1",
+            sourceSha: "a".repeat(40),
+            candidateManifestSha256: "b".repeat(64),
+            releaseCanaryNonce: request.releaseCanaryNonce,
+            tenantId: "tenant",
+            siteId: "site",
+            intendedUseId: "intended-use",
+            modelEvidenceSha256: "5".repeat(64),
+            gaOperationsEvidenceSha256: "6".repeat(64),
+          },
         },
         { status: canaryStatus },
       );
+    }
     throw new Error(`unexpected URL ${url}`);
   };
   return { calls, endpoints, fetcher };
@@ -117,6 +152,12 @@ test("opens bounded MARY, T1, and Jackson capacity and leaves the admitted relea
 test("returns Jackson to exact zero when the deployed canary fails", async () => {
   const { endpoints, fetcher } = fixture({ canaryStatus: 500 });
   await assert.rejects(runReleaseCanary(environment(), fetcher, async () => {}), /canary failed/);
+  assert.ok(endpoints.every(({ workersMin, workersMax }) => workersMin === 0 && workersMax === 0));
+});
+
+test("rejects candidate schema-only self-attestation and closes capacity", async () => {
+  const { endpoints, fetcher } = fixture({ invalidReceipt: true });
+  await assert.rejects(runReleaseCanary(environment(), fetcher, async () => {}), /receipt is invalid/);
   assert.ok(endpoints.every(({ workersMin, workersMax }) => workersMin === 0 && workersMax === 0));
 });
 
