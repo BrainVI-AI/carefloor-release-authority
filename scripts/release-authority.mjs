@@ -123,6 +123,7 @@ async function approve() {
   const values = {
     receipt_base64: raw.toString("base64"),
     signature_base64: sign(null, raw, privateKey).toString("base64"),
+    public_key_pem_base64: Buffer.from(publicKey.export({ type: "spki", format: "pem" })).toString("base64"),
     public_key_sha256: publicKeySha256,
     approved_by: receipt.approvedBy,
     approval_sha256: sha256(raw),
@@ -137,7 +138,7 @@ async function vercelRequest(url, init = {}) {
 }
 
 async function version(origin) {
-  const response = await fetch(`${origin}/api/version`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+  const response = await fetch(`${origin}/api/version`, { cache: "no-store", signal: AbortSignal.timeout(15_000), headers: process.env.VERCEL_AUTOMATION_BYPASS_SECRET ? { "x-vercel-protection-bypass": process.env.VERCEL_AUTOMATION_BYPASS_SECRET } : {} });
   if (!response.ok) throw new Error(`Carefloor version unavailable: ${origin}`);
   return response.json();
 }
@@ -148,7 +149,7 @@ async function promote() {
   validateEvidence(required("EVIDENCE_DIR"), evidence);
   const raw = Buffer.from(required("APPROVAL_RECEIPT_BASE64"), "base64");
   const signature = Buffer.from(required("APPROVAL_SIGNATURE_BASE64"), "base64");
-  const publicKey = createPublicKey(required("APPROVAL_PUBLIC_KEY_PEM"));
+  const publicKey = createPublicKey(Buffer.from(required("APPROVAL_PUBLIC_KEY_PEM_BASE64"), "base64"));
   const publicDer = publicKey.export({ type: "spki", format: "der" });
   if (sha256(publicDer) !== required("EXPECTED_PUBLIC_KEY_SHA256")) throw new Error("Release approval trust root mismatch");
   const deploymentUrl = new URL(required("DEPLOYMENT_URL"));
@@ -194,7 +195,7 @@ async function consume() {
   validateEvidence(required("EVIDENCE_DIR"), evidence);
   const raw = Buffer.from(required("APPROVAL_RECEIPT_BASE64"), "base64");
   const signature = Buffer.from(required("APPROVAL_SIGNATURE_BASE64"), "base64");
-  const publicKey = createPublicKey(required("APPROVAL_PUBLIC_KEY_PEM"));
+  const publicKey = createPublicKey(Buffer.from(required("APPROVAL_PUBLIC_KEY_PEM_BASE64"), "base64"));
   if (sha256(publicKey.export({ type: "spki", format: "der" })) !== required("EXPECTED_PUBLIC_KEY_SHA256")) throw new Error("Release approval trust root mismatch");
   const receipt = verifyApprovalReceipt(raw, signature, publicKey, { ...evidence, deploymentUrl: new URL(required("DEPLOYMENT_URL")).href.replace(/\/$/, ""), callerRepository: required("GITHUB_REPOSITORY"), callerWorkflowRef: required("GITHUB_WORKFLOW_REF"), callerWorkflowSha: required("GITHUB_WORKFLOW_SHA"), callerRunId: required("GITHUB_RUN_ID"), callerRunAttempt: required("GITHUB_RUN_ATTEMPT"), triggeringActor: required("GITHUB_TRIGGERING_ACTOR") });
   writeJson("authority/approval-consumption.json", { schema: "brainvi.carefloor.approval-consumption.v1", approvalReceiptSha256: sha256(raw), nonce: receipt.nonce, consumedAt: new Date().toISOString() });

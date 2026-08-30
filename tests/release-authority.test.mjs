@@ -38,6 +38,7 @@ test("approval identities reject stale reviews and self approval", () => {
 test("rollback marker precedes the production mutation and approval is consumed first", () => {
   const script = fs.readFileSync(new URL("../scripts/release-authority.mjs", import.meta.url), "utf8");
   assert.ok(script.indexOf('fs.writeFileSync("authority/promotion-started"') < script.indexOf("/promote/${encodeURIComponent(staged.id)}"));
+  assert.match(script, /"x-vercel-protection-bypass": process\.env\.VERCEL_AUTOMATION_BYPASS_SECRET/);
   const workflow = fs.readFileSync(new URL("../.github/workflows/promote-carefloor.yml", import.meta.url), "utf8");
   assert.ok(workflow.indexOf("release-authority.mjs consume") < workflow.indexOf("release-authority.mjs promote"));
   assert.match(workflow, /carefloor-approval-consumed-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);

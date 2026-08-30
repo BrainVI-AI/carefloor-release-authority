@@ -11,6 +11,7 @@ on:
       canonical_url: { required: true, type: string }
       approval_receipt_base64: { required: true, type: string }
       approval_signature_base64: { required: true, type: string }
+      approval_public_key_pem_base64: { required: true, type: string }
 
 permissions:
   actions: read
@@ -32,11 +33,12 @@ jobs:
       CANONICAL_URL: ${{ inputs.canonical_url }}
       APPROVAL_RECEIPT_BASE64: ${{ inputs.approval_receipt_base64 }}
       APPROVAL_SIGNATURE_BASE64: ${{ inputs.approval_signature_base64 }}
-      APPROVAL_PUBLIC_KEY_PEM: ${{ secrets.CAREFLOOR_RELEASE_APPROVAL_PUBLIC_KEY_PEM }}
+      APPROVAL_PUBLIC_KEY_PEM_BASE64: ${{ inputs.approval_public_key_pem_base64 }}
       EXPECTED_PUBLIC_KEY_SHA256: ${{ vars.CAREFLOOR_RELEASE_APPROVAL_PUBLIC_KEY_SHA256 }}
       VERCEL_ORG_ID: ${{ vars.CAREFLOOR_VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ vars.CAREFLOOR_VERCEL_PROJECT_ID }}
       VERCEL_TOKEN: ${{ secrets.CAREFLOOR_VERCEL_PROMOTION_TOKEN }}
+      VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.CAREFLOOR_VERCEL_AUTOMATION_BYPASS_SECRET }}
       EVIDENCE_DIR: authority/evidence
       GH_TOKEN: ${{ github.token }}
     steps:

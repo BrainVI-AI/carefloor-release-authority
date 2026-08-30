@@ -11,6 +11,7 @@ on:
     outputs:
       receipt_base64: { value: "${{ jobs.approve.outputs.receipt_base64 }}" }
       signature_base64: { value: "${{ jobs.approve.outputs.signature_base64 }}" }
+      public_key_pem_base64: { value: "${{ jobs.approve.outputs.public_key_pem_base64 }}" }
       approved_by: { value: "${{ jobs.approve.outputs.approved_by }}" }
       approval_sha256: { value: "${{ jobs.approve.outputs.approval_sha256 }}" }
 
@@ -29,6 +30,7 @@ jobs:
     outputs:
       receipt_base64: ${{ steps.sign.outputs.receipt_base64 }}
       signature_base64: ${{ steps.sign.outputs.signature_base64 }}
+      public_key_pem_base64: ${{ steps.sign.outputs.public_key_pem_base64 }}
       approved_by: ${{ steps.sign.outputs.approved_by }}
       approval_sha256: ${{ steps.sign.outputs.approval_sha256 }}
     steps:
