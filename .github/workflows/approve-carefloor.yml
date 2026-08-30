@@ -34,14 +34,11 @@ jobs:
     steps:
       - name: Resolve immutable authority workflow identity
         id: authority
-        env:
-          TOKEN_URL: ${{ env.ACTIONS_ID_TOKEN_REQUEST_URL }}
-          TOKEN_REQUEST: ${{ env.ACTIONS_ID_TOKEN_REQUEST_TOKEN }}
         run: |
           node <<'JS'
           const fs = require("node:fs");
           (async () => {
-            const response = await fetch(`${process.env.TOKEN_URL}&audience=carefloor-release-authority`, { headers: { Authorization: `Bearer ${process.env.TOKEN_REQUEST}` } });
+            const response = await fetch(`${process.env.ACTIONS_ID_TOKEN_REQUEST_URL}&audience=carefloor-release-authority`, { headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` } });
             if (!response.ok) throw new Error(`OIDC identity unavailable: ${response.status}`);
             const { value } = await response.json();
             const claims = JSON.parse(Buffer.from(value.split(".")[1], "base64url"));

@@ -64,7 +64,7 @@ async function sourceApproval(repository, sourceSha, token) {
   const pulls = await request(`https://api.github.com/repos/${repository}/commits/${sourceSha}/pulls`, { token });
   const pr = pulls.find((item) => item.merged_at && item.base?.ref === "main" && item.merge_commit_sha === sourceSha);
   if (!pr) throw new Error("Release source is not an immutable merged pull-request commit on main");
-  const reviews = await request(`https://api.github.com/repos/${repository}/pulls/${pr.number}/reviews?per_page=100`, { token });
+  const reviews = (await request(`https://api.github.com/repos/${repository}/pulls/${pr.number}/reviews?per_page=100`, { token })).sort((a, b) => String(a.submitted_at).localeCompare(String(b.submitted_at)));
   const latest = new Map();
   for (const review of reviews) if (review.user?.login) latest.set(review.user.login, review.state);
   const reviewers = [...latest].filter(([login, state]) => state === "APPROVED" && login !== pr.user?.login).map(([login]) => login).sort();
