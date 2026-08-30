@@ -1,0 +1,88 @@
+name: Approve Carefloor
+
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      candidate_sha256:
+        required: true
+        type: string
+      approval_reference:
+        required: true
+        type: string
+      initiated_by:
+        required: true
+        type: string
+    outputs:
+      receipt_base64:
+        value: ${{ jobs.approve.outputs.receipt_base64 }}
+      signature_base64:
+        value: ${{ jobs.approve.outputs.signature_base64 }}
+      public_key_pem_base64:
+        value: ${{ jobs.approve.outputs.public_key_pem_base64 }}
+      public_key_sha256:
+        value: ${{ jobs.approve.outputs.public_key_sha256 }}
+      authority_id:
+        value: ${{ jobs.approve.outputs.authority_id }}
+
+permissions:
+  contents: read
+
+jobs:
+  approve:
+    environment: carefloor-production-approval
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      receipt_base64: ${{ steps.sign.outputs.receipt_base64 }}
+      signature_base64: ${{ steps.sign.outputs.signature_base64 }}
+      public_key_pem_base64: ${{ steps.sign.outputs.public_key_pem_base64 }}
+      public_key_sha256: ${{ steps.sign.outputs.public_key_sha256 }}
+      authority_id: ${{ steps.sign.outputs.authority_id }}
+    steps:
+      - name: Sign exact candidate approval
+        id: sign
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          INITIATED_BY: ${{ inputs.initiated_by }}
+          AUTHORITY_ID: ${{ vars.CAREFLOOR_RELEASE_APPROVAL_AUTHORITY_ID }}
+          EXPECTED_PUBLIC_KEY_SHA256: ${{ vars.CAREFLOOR_RELEASE_APPROVAL_PUBLIC_KEY_SHA256 }}
+          PRIVATE_KEY_PEM: ${{ secrets.CAREFLOOR_RELEASE_APPROVAL_PRIVATE_KEY_PEM }}
+        run: |
+          node <<'JS'
+          const fs = require("node:fs");
+          const { createHash, createPrivateKey, createPublicKey, sign } = require("node:crypto");
+          const hex = (value, length) => new RegExp(`^[a-f0-9]{${length}}$`).test(value ?? "");
+          const id = /^[A-Za-z0-9][A-Za-z0-9._@/-]{1,127}$/;
+          const reference = /^[A-Za-z0-9][A-Za-z0-9._:/-]{5,127}$/;
+          if (process.env.GITHUB_REPOSITORY !== "BrainVI-AI/brainvi-monorepo") throw new Error("Untrusted Carefloor approval caller");
+          if (!hex(process.env.SOURCE_SHA, 40) || !hex(process.env.CANDIDATE_SHA256, 64) || !reference.test(process.env.APPROVAL_REFERENCE ?? "") || !id.test(process.env.INITIATED_BY ?? "") || !id.test(process.env.AUTHORITY_ID ?? "") || process.env.INITIATED_BY === process.env.AUTHORITY_ID) throw new Error("Invalid Carefloor approval identity");
+          const privateKey = createPrivateKey(process.env.PRIVATE_KEY_PEM);
+          if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Invalid Carefloor approval key");
+          const publicKey = createPublicKey(privateKey);
+          const publicDer = publicKey.export({ type: "spki", format: "der" });
+          const publicKeySha256 = createHash("sha256").update(publicDer).digest("hex");
+          if (publicKeySha256 !== process.env.EXPECTED_PUBLIC_KEY_SHA256) throw new Error("Carefloor approval trust root mismatch");
+          const approvedAt = new Date();
+          const receipt = JSON.stringify({
+            schema: "brainvi.carefloor.release-approval.v1",
+            sourceSha: process.env.SOURCE_SHA,
+            candidateManifestSha256: process.env.CANDIDATE_SHA256,
+            approvalReference: process.env.APPROVAL_REFERENCE,
+            approvedBy: process.env.AUTHORITY_ID,
+            approvedAt: approvedAt.toISOString(),
+            expiresAt: new Date(approvedAt.getTime() + 30 * 60_000).toISOString(),
+          });
+          const values = {
+            receipt_base64: Buffer.from(receipt).toString("base64"),
+            signature_base64: sign(null, Buffer.from(receipt), privateKey).toString("base64"),
+            public_key_pem_base64: Buffer.from(publicKey.export({ type: "spki", format: "pem" })).toString("base64"),
+            public_key_sha256: publicKeySha256,
+            authority_id: process.env.AUTHORITY_ID,
+          };
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, Object.entries(values).map(([key, value]) => `${key}=${value}`).join("\n") + "\n");
+          JS
