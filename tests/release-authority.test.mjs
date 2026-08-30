@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
-import { generateKeyPairSync, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
 import test from "node:test";
-import { createApprovalReceipt, verifyApprovalReceipt } from "../scripts/release-authority.mjs";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { approvedReviewers, createApprovalReceipt, environmentApprover, validateEvidence, verifyApprovalReceipt } from "../scripts/release-authority.mjs";
 
 const { privateKey, publicKey } = generateKeyPairSync("ed25519");
 const fields = {
@@ -20,4 +23,37 @@ test("approval is exact-run bound and rejects replay", () => {
   assert.throws(() => verifyApprovalReceipt(raw, signature, publicKey, { callerRunId: "124" }, now), /binding mismatch/);
   assert.throws(() => verifyApprovalReceipt(raw, signature, publicKey, { triggeringActor: "attacker" }, now), /binding mismatch/);
   assert.throws(() => verifyApprovalReceipt(raw, signature, publicKey, { callerRunId: "123" }, new Date("2026-08-30T13:00:00Z")), /validity window/);
+});
+
+test("approval identities reject stale reviews and self approval", () => {
+  const reviews = [
+    { user: { login: "reviewer" }, state: "APPROVED", commit_id: "old", submitted_at: "2026-08-30T10:00:00Z" },
+    { user: { login: "fresh" }, state: "APPROVED", commit_id: "head", submitted_at: "2026-08-30T10:01:00Z" },
+  ];
+  assert.deepEqual(approvedReviewers(reviews, "head", "author"), ["fresh"]);
+  assert.equal(environmentApprover([{ state: "approved", environments: [{ name: "carefloor-production-approval" }], user: { login: "human" } }], "carefloor-production-approval", "author"), "human");
+  assert.throws(() => environmentApprover([{ state: "approved", environments: [{ name: "carefloor-production-approval" }], user: { login: "author" } }], "carefloor-production-approval", "author"), /independent/);
+});
+
+test("rollback marker precedes the production mutation and approval is consumed first", () => {
+  const script = fs.readFileSync(new URL("../scripts/release-authority.mjs", import.meta.url), "utf8");
+  assert.ok(script.indexOf('fs.writeFileSync("authority/promotion-started"') < script.indexOf("/promote/${encodeURIComponent(staged.id)}"));
+  const workflow = fs.readFileSync(new URL("../.github/workflows/promote-carefloor.yml", import.meta.url), "utf8");
+  assert.ok(workflow.indexOf("release-authority.mjs consume") < workflow.indexOf("release-authority.mjs promote"));
+  assert.match(workflow, /carefloor-approval-consumed-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+});
+
+test("evidence validation rejects a mutated source receipt", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "carefloor-authority-"));
+  const sha = (value) => createHash("sha256").update(value).digest("hex");
+  const receipts = { "control-plane.json": "control", "migration.json": "migration", "transaction.json": "transaction", "jackson-cost-receipt.json": "cost" };
+  for (const [file, value] of Object.entries(receipts)) fs.writeFileSync(path.join(root, file), value);
+  const artifact = { sourceSha: "a".repeat(40), sha256: "c".repeat(64) };
+  fs.writeFileSync(path.join(root, "vercel-artifact.json"), JSON.stringify(artifact));
+  const candidate = { sourceSha: artifact.sourceSha, browserCandidateManifestSha256: "b".repeat(64), vercelArtifactSha256: artifact.sha256, controlPlaneReceiptSha256: sha("control"), migrationReceiptSha256: sha("migration"), transactionReceiptSha256: sha("transaction"), jacksonCostReceiptSha256: sha("cost") };
+  fs.writeFileSync(path.join(root, "candidate.json"), JSON.stringify(candidate));
+  const expected = { sourceSha: artifact.sourceSha, candidateManifestSha256: candidate.browserCandidateManifestSha256, vercelArtifactSha256: artifact.sha256, releaseEnvelopeSha256: sha(JSON.stringify(candidate)) };
+  assert.equal(validateEvidence(root, expected).sourceSha, artifact.sourceSha);
+  fs.writeFileSync(path.join(root, "migration.json"), "tampered");
+  assert.throws(() => validateEvidence(root, expected), /migrationReceiptSha256/);
 });

@@ -53,6 +53,18 @@ export function verifyApprovalReceipt(raw, signature, publicKey, expected, now =
   return receipt;
 }
 
+export function approvedReviewers(reviews, headSha, author) {
+  const latest = new Map();
+  for (const review of [...reviews].sort((a, b) => String(a.submitted_at).localeCompare(String(b.submitted_at)))) if (review.user?.login) latest.set(review.user.login, review);
+  return [...latest.values()].filter((review) => review.state === "APPROVED" && review.commit_id === headSha && review.user.login !== author).map((review) => review.user.login).sort();
+}
+
+export function environmentApprover(records, environment, author) {
+  const approvals = records.filter((record) => record.state === "approved" && record.environments?.some(({ name }) => name === environment) && record.user?.login && record.user.login !== author);
+  if (!approvals.length) throw new Error("Release lacks an independent protected-environment approval");
+  return approvals.at(-1).user.login;
+}
+
 async function request(url, { token, ...init } = {}) {
   const response = await fetch(url, { ...init, signal: AbortSignal.timeout(15_000), headers: { Accept: "application/vnd.github+json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(init.headers ?? {}) } });
   const text = await response.text();
@@ -64,14 +76,10 @@ async function sourceApproval(repository, sourceSha, token) {
   const pulls = await request(`https://api.github.com/repos/${repository}/commits/${sourceSha}/pulls`, { token });
   const pr = pulls.find((item) => item.merged_at && item.base?.ref === "main" && item.merge_commit_sha === sourceSha);
   if (!pr) throw new Error("Release source is not an immutable merged pull-request commit on main");
-  const reviews = (await request(`https://api.github.com/repos/${repository}/pulls/${pr.number}/reviews?per_page=100`, { token })).sort((a, b) => String(a.submitted_at).localeCompare(String(b.submitted_at)));
-  const latest = new Map();
-  for (const review of reviews) if (review.user?.login) latest.set(review.user.login, review.state);
-  const reviewers = [...latest].filter(([login, state]) => state === "APPROVED" && login !== pr.user?.login).map(([login]) => login).sort();
+  const reviews = await request(`https://api.github.com/repos/${repository}/pulls/${pr.number}/reviews?per_page=100`, { token });
+  const reviewers = approvedReviewers(reviews, pr.head.sha, pr.user.login);
   if (!reviewers.length) throw new Error("Release source lacks an independent approved pull-request review");
-  const approvedBy = required("GITHUB_ACTOR");
-  if (!reviewers.includes(approvedBy)) throw new Error("Workflow dispatcher must be an approved source reviewer");
-  return { initiatedBy: pr.user.login, approvedBy, codeReviewers: reviewers, approvalReference: pr.html_url };
+  return { initiatedBy: pr.user.login, codeReviewers: reviewers, approvalReference: pr.html_url };
 }
 
 function expectedEvidence() {
@@ -88,7 +96,8 @@ async function approve() {
   const evidence = expectedEvidence();
   validateEvidence(required("EVIDENCE_DIR"), evidence);
   const source = await sourceApproval(process.env.GITHUB_REPOSITORY, evidence.sourceSha, required("GH_TOKEN"));
-  if (source.approvedBy === source.initiatedBy) throw new Error("Release initiator cannot approve their own source");
+  const approvalHistory = await request(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${required("GITHUB_RUN_ID")}/approvals`, { token: process.env.GH_TOKEN });
+  const approvedBy = environmentApprover(approvalHistory, "carefloor-production-approval", source.initiatedBy);
   const privateKey = createPrivateKey(required("PRIVATE_KEY_PEM"));
   if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Invalid release approval key");
   const publicKey = createPublicKey(privateKey);
@@ -99,6 +108,8 @@ async function approve() {
     ...evidence,
     deploymentUrl: required("DEPLOYMENT_URL"),
     ...source,
+    approvedBy,
+    dispatchedBy: required("GITHUB_ACTOR"),
     triggeringActor: required("GITHUB_TRIGGERING_ACTOR"),
     callerRepository: process.env.GITHUB_REPOSITORY,
     callerWorkflowRef: required("GITHUB_WORKFLOW_REF"),
@@ -164,8 +175,8 @@ async function promote() {
   const previousVersion = await version(canonicalUrl.origin);
   writeJson("authority/rollback.json", { projectId, previousDeploymentId: previous.id, previousVersion, stagedDeploymentId: staged.id, canonicalUrl: canonicalUrl.href });
   if (previous.id !== staged.id) {
-    await vercelRequest(`https://api.vercel.com/v10/projects/${encodeURIComponent(projectId)}/promote/${encodeURIComponent(staged.id)}?teamId=${encodeURIComponent(orgId)}`, { method: "POST", body: "{}" });
     fs.writeFileSync("authority/promotion-started", `${staged.id}\n`);
+    await vercelRequest(`https://api.vercel.com/v10/projects/${encodeURIComponent(projectId)}/promote/${encodeURIComponent(staged.id)}?teamId=${encodeURIComponent(orgId)}`, { method: "POST", body: "{}" });
   }
   for (let attempt = 0; attempt < 60; attempt += 1) {
     const current = await version(canonicalUrl.origin).catch(() => null);
@@ -176,6 +187,17 @@ async function promote() {
     await new Promise((resolve) => setTimeout(resolve, 5_000));
   }
   throw new Error("Canonical Carefloor promotion did not converge");
+}
+
+async function consume() {
+  const evidence = expectedEvidence();
+  validateEvidence(required("EVIDENCE_DIR"), evidence);
+  const raw = Buffer.from(required("APPROVAL_RECEIPT_BASE64"), "base64");
+  const signature = Buffer.from(required("APPROVAL_SIGNATURE_BASE64"), "base64");
+  const publicKey = createPublicKey(required("APPROVAL_PUBLIC_KEY_PEM"));
+  if (sha256(publicKey.export({ type: "spki", format: "der" })) !== required("EXPECTED_PUBLIC_KEY_SHA256")) throw new Error("Release approval trust root mismatch");
+  const receipt = verifyApprovalReceipt(raw, signature, publicKey, { ...evidence, deploymentUrl: new URL(required("DEPLOYMENT_URL")).href.replace(/\/$/, ""), callerRepository: required("GITHUB_REPOSITORY"), callerWorkflowRef: required("GITHUB_WORKFLOW_REF"), callerWorkflowSha: required("GITHUB_WORKFLOW_SHA"), callerRunId: required("GITHUB_RUN_ID"), callerRunAttempt: required("GITHUB_RUN_ATTEMPT"), triggeringActor: required("GITHUB_TRIGGERING_ACTOR") });
+  writeJson("authority/approval-consumption.json", { schema: "brainvi.carefloor.approval-consumption.v1", approvalReceiptSha256: sha256(raw), nonce: receipt.nonce, consumedAt: new Date().toISOString() });
 }
 
 async function rollback() {
@@ -197,5 +219,5 @@ async function rollback() {
 
 if (process.argv[1] === new URL(import.meta.url).pathname) {
   const command = process.argv[2];
-  ({ approve, promote, rollback }[command]?.() ?? Promise.reject(new Error("Usage: release-authority.mjs approve|promote|rollback"))).catch((error) => { console.error(error.message); process.exitCode = 1; });
+  ({ approve, consume, promote, rollback }[command]?.() ?? Promise.reject(new Error("Usage: release-authority.mjs approve|consume|promote|rollback"))).catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   promote:
-    environment: carefloor-production-promotion
+    environment: carefloor-production-approval
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -73,6 +73,15 @@ jobs:
             --signer-workflow BrainVI-AI/brainvi-monorepo/.github/workflows/carefloor-production-release.yml \
             --deny-self-hosted-runners \
             --predicate-type https://slsa.dev/provenance/v1
+      - name: Validate and consume single-use approval
+        run: node authority-source/scripts/release-authority.mjs consume
+      - name: Commit single-use approval consumption
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: carefloor-approval-consumed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: authority/approval-consumption.json
+          if-no-files-found: error
+          retention-days: 90
       - name: Validate approval and promote exact artifact
         env:
           AUTHORITY_WORKFLOW_REF: ${{ steps.authority.outputs.ref }}
