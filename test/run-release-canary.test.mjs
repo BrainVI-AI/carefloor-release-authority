@@ -102,16 +102,16 @@ function fixture({ canaryStatus = 200 } = {}) {
   return { calls, endpoints, fetcher };
 }
 
-test("opens bounded MARY, T1, and Jackson capacity, runs the bound canary, and returns exact zero", async () => {
+test("opens bounded MARY, T1, and Jackson capacity and leaves the admitted release live", async () => {
   const { calls, endpoints, fetcher } = fixture();
   const result = await runReleaseCanary(environment(), fetcher, async () => {});
   assert.equal(result.transaction.schema, "brainvi.carefloor.release-transaction.v1");
-  assert.equal(result.cost.exactZero, true);
-  assert.ok(endpoints.every(({ workersMin, workersMax }) => workersMin === 0 && workersMax === 0));
+  assert.equal(result.cost.state, "validated_live");
+  assert.ok(endpoints.every(({ workersMin, workersMax }) => workersMin === 0 && workersMax === 1));
   assert.ok(calls.some(([method, url, body]) => method === "PATCH" && url.endsWith("/mary-endpoint") && JSON.parse(body).workersMax === 1));
   assert.ok(calls.some(([method, url, body]) => method === "PATCH" && url.endsWith("/jackson-endpoint") && JSON.parse(body).workersMax === 1));
   assert.ok(calls.some(([method, url]) => method === "POST" && url.endsWith("/api/internal/carefloor-release-canary")));
-  assert.ok(calls.some(([method, url]) => method === "POST" && url.endsWith("/purge-queue")));
+  assert.ok(!calls.some(([method, url]) => method === "POST" && url.endsWith("/purge-queue")));
 });
 
 test("returns Jackson to exact zero when the deployed canary fails", async () => {

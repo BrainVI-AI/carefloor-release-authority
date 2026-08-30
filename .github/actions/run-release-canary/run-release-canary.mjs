@@ -184,7 +184,7 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
   } catch (error) {
     failure = error;
   } finally {
-    for (const lane of opened.reverse()) {
+    for (const lane of failure ? opened.reverse() : []) {
       try {
         await readJson(
           await fetcher(`https://api.runpod.ai/v2/${lane.endpointId}/purge-queue`, {
@@ -217,8 +217,9 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
       completedAt: new Date().toISOString(),
       maxCostUsd,
       workersMin: 0,
-      workersMax: 0,
-      exactZero: true,
+      workersMax: 1,
+      exactZero: false,
+      state: "validated_live",
     },
   };
 }
