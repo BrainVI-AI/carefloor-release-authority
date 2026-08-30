@@ -1,0 +1,105 @@
+name: Authorize Carefloor Worker
+
+on:
+  workflow_call:
+    inputs:
+      source_sha: { required: true, type: string }
+      image: { required: true, type: string }
+      tenant_id: { required: true, type: string }
+      valid_until: { required: true, type: string }
+    outputs:
+      receipt_base64: { value: "${{ jobs.authorize.outputs.receipt_base64 }}" }
+      signature_base64: { value: "${{ jobs.authorize.outputs.signature_base64 }}" }
+      evidence_json_base64: { value: "${{ jobs.authorize.outputs.evidence_json_base64 }}" }
+      evidence_sha256: { value: "${{ jobs.authorize.outputs.evidence_sha256 }}" }
+      evidence_signature_base64: { value: "${{ jobs.authorize.outputs.evidence_signature_base64 }}" }
+      evidence_public_key_pem_base64: { value: "${{ jobs.authorize.outputs.evidence_public_key_pem_base64 }}" }
+
+permissions:
+  attestations: read
+  contents: read
+  id-token: write
+  packages: read
+
+jobs:
+  authorize:
+    environment: carefloor-production-approval
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      receipt_base64: ${{ steps.sign.outputs.receipt_base64 }}
+      signature_base64: ${{ steps.sign.outputs.signature_base64 }}
+      evidence_json_base64: ${{ steps.sign.outputs.evidence_json_base64 }}
+      evidence_sha256: ${{ steps.sign.outputs.evidence_sha256 }}
+      evidence_signature_base64: ${{ steps.sign.outputs.evidence_signature_base64 }}
+      evidence_public_key_pem_base64: ${{ steps.sign.outputs.evidence_public_key_pem_base64 }}
+    steps:
+      - name: Verify source and sign worker authority
+        id: sign
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          IMAGE: ${{ inputs.image }}
+          TENANT_ID: ${{ inputs.tenant_id }}
+          VALID_UNTIL: ${{ inputs.valid_until }}
+          PRIVATE_KEY_PEM: ${{ secrets.CAREFLOOR_RELEASE_APPROVAL_PRIVATE_KEY_PEM }}
+          EVIDENCE_PRIVATE_KEY_PEM: ${{ secrets.CAREFLOOR_WORKER_ATTESTATION_PRIVATE_KEY_PEM }}
+          EXPECTED_EVIDENCE_PUBLIC_KEY_SHA256: ${{ vars.CAREFLOOR_WORKER_ATTESTATION_EVIDENCE_PUBLIC_KEY_SHA256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = BrainVI-AI/brainvi-monorepo
+          [[ "$SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$IMAGE" =~ ^ghcr.io/brainvi-ai/brainvi-watchfloor-perception@sha256:[a-f0-9]{64}$ ]]
+          [[ "$TENANT_ID" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+          AUTHOR="$(gh api "repos/$GITHUB_REPOSITORY/commits/$SOURCE_SHA" --jq '.author.login // empty')"
+          test -n "$AUTHOR"
+          test "$AUTHOR" != "$GITHUB_ACTOR"
+          gh attestation verify "oci://$IMAGE" --repo "$GITHUB_REPOSITORY" --source-digest "$SOURCE_SHA" --source-ref refs/heads/main --signer-workflow BrainVI-AI/brainvi-monorepo/.github/workflows/build-watchfloor-perception-serverless.yml --deny-self-hosted-runners --predicate-type https://slsa.dev/provenance/v1 --format json > "$RUNNER_TEMP/carefloor-worker-provenance.json"
+          gh attestation verify "oci://$IMAGE" --repo "$GITHUB_REPOSITORY" --source-digest "$SOURCE_SHA" --source-ref refs/heads/main --signer-workflow BrainVI-AI/brainvi-monorepo/.github/workflows/build-watchfloor-perception-serverless.yml --deny-self-hosted-runners --predicate-type https://spdx.dev/Document --format json > "$RUNNER_TEMP/carefloor-worker-sbom.json"
+          node <<'JS'
+          const { createHash, createPrivateKey, createPublicKey, sign, verify } = require("node:crypto");
+          const fs = require("node:fs");
+          (async () => {
+            const expiresAt = Date.parse(process.env.VALID_UNTIL);
+            if (!Number.isFinite(expiresAt) || expiresAt <= Date.now() || expiresAt - Date.now() > 90 * 86400000) throw new Error("Worker authority expiry is invalid");
+            const tokenResponse = await fetch(`${process.env.ACTIONS_ID_TOKEN_REQUEST_URL}&audience=carefloor-release-authority`, { headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` } });
+            if (!tokenResponse.ok) throw new Error(`OIDC identity unavailable: ${tokenResponse.status}`);
+            const { value } = await tokenResponse.json();
+            const claims = JSON.parse(Buffer.from(value.split(".")[1], "base64url"));
+            if (!/^BrainVI-AI\/carefloor-release-authority\/.github\/workflows\/authorize-carefloor-worker\.yml@/.test(claims.job_workflow_ref) || !/^[a-f0-9]{40}$/.test(claims.job_workflow_sha)) throw new Error("Untrusted authority workflow identity");
+            const receipt = Buffer.from(JSON.stringify({schema:"brainvi.carefloor.worker-preflight.v1",sourceSha:process.env.SOURCE_SHA,image:process.env.IMAGE,tenantId:process.env.TENANT_ID,validUntil:process.env.VALID_UNTIL,authorityWorkflowRef:claims.job_workflow_ref,authorityWorkflowSha:claims.job_workflow_sha,approvalEnvironment:"carefloor-production-approval",githubRunId:process.env.GITHUB_RUN_ID,githubRunAttempt:process.env.GITHUB_RUN_ATTEMPT,authorizedAt:new Date().toISOString()}));
+            const privateKey = createPrivateKey(process.env.PRIVATE_KEY_PEM);
+            const signature = sign(null, receipt, privateKey);
+            if (!verify(null, receipt, createPublicKey(privateKey), signature)) throw new Error("Worker preflight signature verification failed");
+            const sha256 = value => createHash("sha256").update(value).digest("hex");
+            const evidencePrivateKey = createPrivateKey(process.env.EVIDENCE_PRIVATE_KEY_PEM);
+            const evidencePublicKey = createPublicKey(evidencePrivateKey).export({ type: "spki", format: "pem" });
+            if (!/^[a-f0-9]{64}$/.test(process.env.EXPECTED_EVIDENCE_PUBLIC_KEY_SHA256 ?? "") || sha256(evidencePublicKey) !== process.env.EXPECTED_EVIDENCE_PUBLIC_KEY_SHA256) throw new Error("Worker evidence trust root mismatch");
+            const evidenceJson = JSON.stringify({
+              schema: "brainvi.carefloor.worker-attestation-evidence.v1",
+              tenantId: process.env.TENANT_ID,
+              image: process.env.IMAGE,
+              sourceDigest: process.env.SOURCE_SHA,
+              repository: "BrainVI-AI/brainvi-monorepo",
+              sourceRef: "refs/heads/main",
+              signerWorkflow: "BrainVI-AI/brainvi-monorepo/.github/workflows/build-watchfloor-perception-serverless.yml",
+              provenancePredicateType: "https://slsa.dev/provenance/v1",
+              sbomPredicateType: "https://spdx.dev/Document",
+              provenanceVerificationSha256: sha256(fs.readFileSync(`${process.env.RUNNER_TEMP}/carefloor-worker-provenance.json`)),
+              sbomVerificationSha256: sha256(fs.readFileSync(`${process.env.RUNNER_TEMP}/carefloor-worker-sbom.json`)),
+              verifiedAt: new Date().toISOString(),
+              validUntil: process.env.VALID_UNTIL,
+              approvedBy: `authority-${claims.job_workflow_sha}`,
+            });
+            const evidenceSignature = sign(null, Buffer.from(evidenceJson), evidencePrivateKey);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, [
+              `receipt_base64=${receipt.toString("base64")}`,
+              `signature_base64=${signature.toString("base64")}`,
+              `evidence_json_base64=${Buffer.from(evidenceJson).toString("base64")}`,
+              `evidence_sha256=${sha256(evidenceJson)}`,
+              `evidence_signature_base64=${evidenceSignature.toString("base64")}`,
+              `evidence_public_key_pem_base64=${Buffer.from(evidencePublicKey).toString("base64")}`,
+              "",
+            ].join("\n"));
+          })().catch((error) => { console.error(error.message); process.exit(1); });
+          JS

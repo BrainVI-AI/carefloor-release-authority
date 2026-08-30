@@ -1,0 +1,67 @@
+name: Authorize Carefloor Preflight
+
+on:
+  workflow_call:
+    inputs:
+      source_sha: { required: true, type: string }
+      candidate_sha256: { required: true, type: string }
+    outputs:
+      receipt_base64: { value: "${{ jobs.authorize.outputs.receipt_base64 }}" }
+      signature_base64: { value: "${{ jobs.authorize.outputs.signature_base64 }}" }
+      public_key_pem_base64: { value: "${{ jobs.authorize.outputs.public_key_pem_base64 }}" }
+      approved_by: { value: "${{ jobs.authorize.outputs.approved_by }}" }
+
+permissions:
+  actions: read
+  contents: read
+  id-token: write
+  pull-requests: read
+
+jobs:
+  authorize:
+    environment: carefloor-production-approval
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    outputs:
+      receipt_base64: ${{ steps.sign.outputs.receipt_base64 }}
+      signature_base64: ${{ steps.sign.outputs.signature_base64 }}
+      public_key_pem_base64: ${{ steps.sign.outputs.public_key_pem_base64 }}
+      approved_by: ${{ steps.sign.outputs.approved_by }}
+    steps:
+      - name: Resolve immutable authority workflow identity
+        id: authority
+        run: |
+          node <<'JS'
+          const fs = require("node:fs");
+          (async () => {
+            const response = await fetch(`${process.env.ACTIONS_ID_TOKEN_REQUEST_URL}&audience=carefloor-release-authority`, { headers: { Authorization: `Bearer ${process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN}` } });
+            if (!response.ok) throw new Error(`OIDC identity unavailable: ${response.status}`);
+            const { value } = await response.json();
+            const claims = JSON.parse(Buffer.from(value.split(".")[1], "base64url"));
+            if (!/^BrainVI-AI\/carefloor-release-authority\/.github\/workflows\/authorize-carefloor-preflight\.yml@/.test(claims.job_workflow_ref) || !/^[a-f0-9]{40}$/.test(claims.job_workflow_sha)) throw new Error("Untrusted authority workflow identity");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `ref=${claims.job_workflow_ref}\nsha=${claims.job_workflow_sha}\n`);
+          })().catch((error) => { console.error(error.message); process.exit(1); });
+          JS
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: BrainVI-AI/carefloor-release-authority
+          ref: ${{ steps.authority.outputs.sha }}
+          path: authority-source
+      - name: Verify source review and sign pre-mutation authority
+        id: sign
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          AUTHORITY_WORKFLOW_REF: ${{ steps.authority.outputs.ref }}
+          AUTHORITY_WORKFLOW_SHA: ${{ steps.authority.outputs.sha }}
+          EXPECTED_PUBLIC_KEY_SHA256: ${{ vars.CAREFLOOR_RELEASE_APPROVAL_PUBLIC_KEY_SHA256 }}
+          PRIVATE_KEY_PEM: ${{ secrets.CAREFLOOR_RELEASE_APPROVAL_PRIVATE_KEY_PEM }}
+          GH_TOKEN: ${{ github.token }}
+        run: node authority-source/scripts/release-authority.mjs preflight
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: carefloor-preflight-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            authority/preflight-receipt.json
+            authority/preflight-signature.base64
+          retention-days: 90
