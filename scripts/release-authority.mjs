@@ -24,7 +24,7 @@ export function validateEvidence(root, expected) {
   const candidate = JSON.parse(fs.readFileSync(candidateFile, "utf8"));
   const artifact = JSON.parse(fs.readFileSync(path.join(root, "vercel-artifact.json"), "utf8"));
   if (candidate.sourceSha !== expected.sourceSha || candidate.browserCandidateManifestSha256 !== expected.candidateManifestSha256 || candidate.vercelArtifactSha256 !== expected.vercelArtifactSha256 || artifact.sourceSha !== expected.sourceSha || artifact.sha256 !== expected.vercelArtifactSha256) throw new Error("Release envelope identity mismatch");
-  for (const [field, file] of [["controlPlaneReceiptSha256", "control-plane.json"], ["migrationReceiptSha256", "migration.json"], ["transactionReceiptSha256", "transaction.json"], ["jacksonCostReceiptSha256", "jackson-cost-receipt.json"]]) {
+  for (const [field, file] of [["controlPlaneReceiptSha256", "control-plane.json"], ["migrationReceiptSha256", "migration.json"], ["transactionReceiptSha256", "transaction.json"], ["jacksonCostReceiptSha256", "jackson-cost-receipt.json"], ["gaOperationsValidationSha256", "ga-operations-validation.json"]]) {
     if (candidate[field] !== fileSha256(path.join(root, file))) throw new Error(`Release receipt mismatch: ${field}`);
   }
   return candidate;

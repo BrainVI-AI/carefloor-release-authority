@@ -89,11 +89,11 @@ test("rollback marker precedes the production mutation and approval is consumed 
 test("evidence validation rejects a mutated source receipt", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "carefloor-authority-"));
   const sha = (value) => createHash("sha256").update(value).digest("hex");
-  const receipts = { "control-plane.json": "control", "migration.json": "migration", "transaction.json": "transaction", "jackson-cost-receipt.json": "cost" };
+  const receipts = { "control-plane.json": "control", "migration.json": "migration", "transaction.json": "transaction", "jackson-cost-receipt.json": "cost", "ga-operations-validation.json": "ga" };
   for (const [file, value] of Object.entries(receipts)) fs.writeFileSync(path.join(root, file), value);
   const artifact = { sourceSha: "a".repeat(40), sha256: "c".repeat(64) };
   fs.writeFileSync(path.join(root, "vercel-artifact.json"), JSON.stringify(artifact));
-  const candidate = { sourceSha: artifact.sourceSha, browserCandidateManifestSha256: "b".repeat(64), vercelArtifactSha256: artifact.sha256, controlPlaneReceiptSha256: sha("control"), migrationReceiptSha256: sha("migration"), transactionReceiptSha256: sha("transaction"), jacksonCostReceiptSha256: sha("cost") };
+  const candidate = { sourceSha: artifact.sourceSha, browserCandidateManifestSha256: "b".repeat(64), vercelArtifactSha256: artifact.sha256, controlPlaneReceiptSha256: sha("control"), migrationReceiptSha256: sha("migration"), transactionReceiptSha256: sha("transaction"), jacksonCostReceiptSha256: sha("cost"), gaOperationsValidationSha256: sha("ga") };
   fs.writeFileSync(path.join(root, "candidate.json"), JSON.stringify(candidate));
   const expected = { sourceSha: artifact.sourceSha, candidateManifestSha256: candidate.browserCandidateManifestSha256, vercelArtifactSha256: artifact.sha256, releaseEnvelopeSha256: sha(JSON.stringify(candidate)) };
   assert.equal(validateEvidence(root, expected).sourceSha, artifact.sourceSha);
