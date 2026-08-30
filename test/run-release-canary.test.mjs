@@ -2,6 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { runReleaseCanary } from "../.github/actions/run-release-canary/run-release-canary.mjs";
+import { runpodConfigurationSha256 } from "../.github/actions/verify-control-plane/verify-control-plane.mjs";
+
+const image = `ghcr.io/brainvi-ai/brainvi-carefloor-jackson@sha256:${"c".repeat(64)}`;
+const template = { imageName: image };
+const admittedEndpoint = {
+  id: "jackson-endpoint",
+  name: "brainvi-carefloor-jackson",
+  templateId: "jackson-template",
+  workersMin: 0,
+  workersMax: 0,
+};
 
 const environment = () => ({
   CAREFLOOR_DEPLOYMENT_URL: "https://brainvi-carefloor-test.vercel.app",
@@ -11,24 +22,26 @@ const environment = () => ({
   CAREFLOOR_RUNPOD_CONTROL_API_KEY: "control-key",
   CAREFLOOR_JACKSON_RUNPOD_API_KEY: "jackson-inference-key",
   CAREFLOOR_JACKSON_RUNPOD_ENDPOINT_ID: "jackson-endpoint",
+  CAREFLOOR_JACKSON_RUNPOD_IMAGE: image,
+  CAREFLOOR_JACKSON_RUNPOD_CONFIGURATION_SHA256: runpodConfigurationSha256(
+    admittedEndpoint,
+    template,
+  ),
   CAREFLOOR_RELEASE_CANARY_MAX_COST_USD: "1",
   RUNNER_TEMP: "/tmp",
 });
 
 function fixture({ canaryStatus = 200 } = {}) {
-  const endpoint = {
-    id: "jackson-endpoint",
-    name: "brainvi-carefloor-jackson",
-    workersMin: 0,
-    workersMax: 0,
-  };
+  const endpoint = { ...admittedEndpoint };
   const calls = [];
   const fetcher = async (input, init = {}) => {
     const url = new URL(input);
     calls.push([init.method ?? "GET", url.href, init.body]);
     if (url.origin === "https://rest.runpod.io") {
       if (init.method === "PATCH") Object.assign(endpoint, JSON.parse(init.body));
-      return Response.json(url.pathname === "/v1/endpoints" ? [endpoint] : endpoint);
+      if (url.pathname === "/v1/endpoints") return Response.json([endpoint]);
+      if (url.pathname === "/v1/templates/jackson-template") return Response.json(template);
+      return Response.json(endpoint);
     }
     if (url.pathname.endsWith("/purge-queue")) return Response.json({ status: "completed" });
     if (url.pathname.endsWith("/health"))

@@ -2,6 +2,8 @@ import { appendFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { runpodConfigurationSha256 } from "../verify-control-plane/verify-control-plane.mjs";
+
 const GIT_SHA = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
 const SAFE_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -93,11 +95,16 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
   const sourceSha = required(environment, "CAREFLOOR_RELEASE_SOURCE_SHA");
   const candidateManifestSha256 = required(environment, "WATCHFLOOR_CANDIDATE_MANIFEST_SHA256");
   const endpointId = required(environment, "CAREFLOOR_JACKSON_RUNPOD_ENDPOINT_ID");
+  const expectedImage = required(environment, "CAREFLOOR_JACKSON_RUNPOD_IMAGE");
+  const expectedConfigurationSha256 = required(
+    environment,
+    "CAREFLOOR_JACKSON_RUNPOD_CONFIGURATION_SHA256",
+  );
   const controlKey = required(environment, "CAREFLOOR_RUNPOD_CONTROL_API_KEY");
   const inferenceKey = required(environment, "CAREFLOOR_JACKSON_RUNPOD_API_KEY");
   const canarySecret = required(environment, "CAREFLOOR_RELEASE_CANARY_SECRET");
   const maxCostUsd = Number(required(environment, "CAREFLOOR_RELEASE_CANARY_MAX_COST_USD"));
-  if (!GIT_SHA.test(sourceSha) || !SHA256.test(candidateManifestSha256) || !SAFE_ID.test(endpointId) || canarySecret.length < 32 || controlKey === inferenceKey || !Number.isFinite(maxCostUsd) || maxCostUsd <= 0 || maxCostUsd > 1)
+  if (!GIT_SHA.test(sourceSha) || !SHA256.test(candidateManifestSha256) || !SHA256.test(expectedConfigurationSha256) || !SAFE_ID.test(endpointId) || !/^ghcr\.io\/brainvi-ai\/brainvi-carefloor-jackson@sha256:[a-f0-9]{64}$/.test(expectedImage) || canarySecret.length < 32 || controlKey === inferenceKey || !Number.isFinite(maxCostUsd) || maxCostUsd <= 0 || maxCostUsd > 1)
     throw new Error("Carefloor release canary binding is invalid");
 
   const version = await readJson(
@@ -119,6 +126,18 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
     endpointId,
   );
   assertCapacity(standby, 0, "standby");
+  if (!SAFE_ID.test(standby.templateId ?? ""))
+    throw new Error("Jackson template binding is invalid");
+  const template = await runpodRequest(
+    fetcher,
+    controlKey,
+    "GET",
+    `templates/${standby.templateId}`,
+  );
+  if (
+    template?.imageName !== expectedImage ||
+    runpodConfigurationSha256(standby, template) !== expectedConfigurationSha256
+  ) throw new Error("Jackson release configuration drifted after admission");
   const startedAt = new Date();
   let opened = false;
   let result;
