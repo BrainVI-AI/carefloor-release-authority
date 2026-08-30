@@ -40,6 +40,29 @@ export function createApprovalReceipt(fields, now = new Date()) {
   };
 }
 
+export function createPreflightReceipt(fields, now = new Date()) {
+  return {
+    schema: "brainvi.carefloor.release-preflight.v2",
+    ...fields,
+    nonce: `${fields.callerRunId}:${fields.callerRunAttempt}:${fields.candidateManifestSha256}`,
+    authorizedAt: now.toISOString(),
+    expiresAt: new Date(now.getTime() + 30 * 60_000).toISOString(),
+  };
+}
+
+export function verifyPreflightReceipt(raw, signature, publicKey, expected, now = new Date()) {
+  if (!verify(null, raw, publicKey, signature)) throw new Error("Release preflight signature is invalid");
+  const receipt = JSON.parse(raw);
+  if (receipt.schema !== "brainvi.carefloor.release-preflight.v2") throw new Error("Unsupported release preflight schema");
+  for (const [field, value] of Object.entries(expected)) if (String(receipt[field]) !== String(value)) throw new Error(`Release preflight binding mismatch: ${field}`);
+  if (receipt.nonce !== `${receipt.callerRunId}:${receipt.callerRunAttempt}:${receipt.candidateManifestSha256}`) throw new Error("Release preflight nonce mismatch");
+  const authorizedAt = Date.parse(receipt.authorizedAt);
+  const expiresAt = Date.parse(receipt.expiresAt);
+  if (!Number.isFinite(authorizedAt) || !Number.isFinite(expiresAt) || expiresAt - authorizedAt !== 30 * 60_000 || now.getTime() < authorizedAt - 60_000 || now.getTime() > expiresAt) throw new Error("Release preflight is outside its validity window");
+  if (!receipt.approvedBy || receipt.approvedBy === receipt.initiatedBy || !Array.isArray(receipt.codeReviewers) || !receipt.codeReviewers.length) throw new Error("Release preflight lacks independent human review");
+  return receipt;
+}
+
 export function verifyApprovalReceipt(raw, signature, publicKey, expected, now = new Date()) {
   if (!verify(null, raw, publicKey, signature)) throw new Error("Release approval signature is invalid");
   const receipt = JSON.parse(raw);
@@ -133,6 +156,46 @@ async function approve() {
   fs.appendFileSync(required("GITHUB_OUTPUT"), Object.entries(values).map(([key, value]) => `${key}=${value}`).join("\n") + "\n");
 }
 
+async function preflight() {
+  if (required("GITHUB_REPOSITORY") !== "BrainVI-AI/brainvi-monorepo" || required("GITHUB_EVENT_NAME") !== "workflow_dispatch" || required("GITHUB_REF") !== "refs/heads/main") throw new Error("Untrusted Carefloor preflight caller");
+  const sourceSha = required("SOURCE_SHA");
+  const candidateManifestSha256 = required("CANDIDATE_SHA256");
+  if (!hex(sourceSha, 40) || !hex(candidateManifestSha256, 64)) throw new Error("Invalid Carefloor preflight identity");
+  const source = await sourceApproval(process.env.GITHUB_REPOSITORY, sourceSha, required("GH_TOKEN"));
+  const approvalHistory = await request(`https://api.github.com/repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${required("GITHUB_RUN_ID")}/approvals`, { token: process.env.GH_TOKEN });
+  const approvedBy = environmentApprover(approvalHistory, "carefloor-production-approval", source.initiatedBy);
+  const privateKey = createPrivateKey(required("PRIVATE_KEY_PEM"));
+  if (privateKey.asymmetricKeyType !== "ed25519") throw new Error("Invalid release preflight key");
+  const publicKey = createPublicKey(privateKey);
+  const publicDer = publicKey.export({ type: "spki", format: "der" });
+  if (sha256(publicDer) !== required("EXPECTED_PUBLIC_KEY_SHA256")) throw new Error("Release preflight trust root mismatch");
+  const receipt = createPreflightReceipt({
+    sourceSha,
+    candidateManifestSha256,
+    ...source,
+    approvedBy,
+    dispatchedBy: required("GITHUB_ACTOR"),
+    triggeringActor: required("GITHUB_TRIGGERING_ACTOR"),
+    callerRepository: process.env.GITHUB_REPOSITORY,
+    callerWorkflowRef: required("GITHUB_WORKFLOW_REF"),
+    callerWorkflowSha: required("GITHUB_WORKFLOW_SHA"),
+    callerRunId: required("GITHUB_RUN_ID"),
+    callerRunAttempt: required("GITHUB_RUN_ATTEMPT"),
+    authorityWorkflowRef: required("AUTHORITY_WORKFLOW_REF"),
+    authorityWorkflowSha: required("AUTHORITY_WORKFLOW_SHA"),
+  });
+  const raw = Buffer.from(JSON.stringify(receipt));
+  const values = {
+    receipt_base64: raw.toString("base64"),
+    signature_base64: sign(null, raw, privateKey).toString("base64"),
+    public_key_pem_base64: Buffer.from(publicKey.export({ type: "spki", format: "pem" })).toString("base64"),
+    approved_by: receipt.approvedBy,
+  };
+  writeJson("authority/preflight-receipt.json", receipt);
+  fs.writeFileSync("authority/preflight-signature.base64", values.signature_base64 + "\n");
+  fs.appendFileSync(required("GITHUB_OUTPUT"), Object.entries(values).map(([key, value]) => `${key}=${value}`).join("\n") + "\n");
+}
+
 async function vercelRequest(url, init = {}) {
   return request(url, { ...init, token: required("VERCEL_TOKEN"), headers: { "Content-Type": "application/json", ...(init.headers ?? {}) } });
 }
@@ -220,5 +283,5 @@ async function rollback() {
 
 if (process.argv[1] === new URL(import.meta.url).pathname) {
   const command = process.argv[2];
-  ({ approve, consume, promote, rollback }[command]?.() ?? Promise.reject(new Error("Usage: release-authority.mjs approve|consume|promote|rollback"))).catch((error) => { console.error(error.message); process.exitCode = 1; });
+  ({ approve, preflight, consume, promote, rollback }[command]?.() ?? Promise.reject(new Error("Usage: release-authority.mjs approve|preflight|consume|promote|rollback"))).catch((error) => { console.error(error.message); process.exitCode = 1; });
 }

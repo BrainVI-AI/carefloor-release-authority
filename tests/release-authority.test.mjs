@@ -4,7 +4,7 @@ import test from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { approvedReviewers, createApprovalReceipt, environmentApprover, validateEvidence, verifyApprovalReceipt } from "../scripts/release-authority.mjs";
+import { approvedReviewers, createApprovalReceipt, createPreflightReceipt, environmentApprover, validateEvidence, verifyApprovalReceipt, verifyPreflightReceipt } from "../scripts/release-authority.mjs";
 
 const { privateKey, publicKey } = generateKeyPairSync("ed25519");
 const fields = {
@@ -33,6 +33,25 @@ test("approval identities reject stale reviews and self approval", () => {
   assert.deepEqual(approvedReviewers(reviews, "head", "author"), ["fresh"]);
   assert.equal(environmentApprover([{ state: "approved", environments: [{ name: "carefloor-production-approval" }], user: { login: "human" } }], "carefloor-production-approval", "author"), "human");
   assert.throws(() => environmentApprover([{ state: "approved", environments: [{ name: "carefloor-production-approval" }], user: { login: "author" } }], "carefloor-production-approval", "author"), /independent/);
+});
+
+test("preflight is exact-run bound and requires independent review", () => {
+  const now = new Date("2026-08-30T12:00:00Z");
+  const receipt = createPreflightReceipt({ ...fields, candidateManifestSha256: "b".repeat(64) }, now);
+  const raw = Buffer.from(JSON.stringify(receipt));
+  const signature = sign(null, raw, privateKey);
+  assert.equal(verifyPreflightReceipt(raw, signature, publicKey, { sourceSha: fields.sourceSha, candidateManifestSha256: "b".repeat(64), callerRunId: "123", callerRunAttempt: "1" }, now).approvedBy, "reviewer");
+  assert.throws(() => verifyPreflightReceipt(raw, signature, publicKey, { candidateManifestSha256: "c".repeat(64) }, now), /binding mismatch/);
+  assert.throws(() => verifyPreflightReceipt(raw, signature, publicKey, { callerRunId: "123" }, new Date("2026-08-30T13:00:00Z")), /validity window/);
+});
+
+test("preflight workflow delegates review validation to immutable authority code", () => {
+  const workflow = fs.readFileSync(new URL("../.github/workflows/authorize-carefloor-preflight.yml", import.meta.url), "utf8");
+  assert.match(workflow, /release-authority\.mjs preflight/);
+  assert.match(workflow, /pull-requests: read/);
+  assert.match(workflow, /actions: read/);
+  assert.match(workflow, /CAREFLOOR_RELEASE_APPROVAL_PUBLIC_KEY_SHA256/);
+  assert.doesNotMatch(workflow, /test "\$AUTHOR" != "\$GITHUB_ACTOR"/);
 });
 
 test("rollback marker precedes the production mutation and approval is consumed first", () => {
