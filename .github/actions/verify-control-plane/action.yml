@@ -1,5 +1,5 @@
 name: Verify Carefloor control plane
-description: Verify digest-pinned zero-capacity RunPod endpoints and Neon retention from the protected release authority.
+description: Verify digest-pinned bounded RunPod endpoints and Neon retention from the protected release authority.
 runs:
   using: node24
   main: verify-control-plane.mjs

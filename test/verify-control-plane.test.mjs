@@ -125,6 +125,14 @@ test("admits only the exact zero-capacity control plane", async () => {
   );
 });
 
+test("admits the exact bounded GA serving configuration against the standby hash", async () => {
+  const fixture = controlPlaneFixture();
+  fixture.environment.CAREFLOOR_RUNPOD_EXPECTED_WORKERS_MAX = "1";
+  fixture.endpoints.forEach((endpoint) => { endpoint.workersMax = 1; });
+  const receipt = await verifyControlPlane(fixture.environment, fixture.fetcher);
+  assert.ok(receipt.runpod.every(({ workersMax }) => workersMax === 1));
+});
+
 test("rejects an inference key that can manage the RunPod account", async () => {
   const fixture = controlPlaneFixture();
   Object.assign(fixture.environment, {
