@@ -42,4 +42,9 @@ test("migration executor preserves the canonical expand-contract gate", async ()
   );
   assert.match(workflow, /0043_carefloor_legal_hold_generations_contract\.sql/);
   assert.match(workflow, /legalHoldGenerations!=="expand-contract-v1"/);
+  assert.match(
+    workflow,
+    /CAREFLOOR_CANONICAL_URL: https:\/\/brainvi-carefloor\.vercel\.app/,
+  );
+  assert.doesNotMatch(workflow, /canonical_url:|inputs\.canonical_url/);
 });

@@ -8,7 +8,6 @@ on:
       artifact_sha256: { required: true, type: string }
       migration_authorization_sha256: { required: true, type: string }
       deployment_url: { required: true, type: string }
-      canonical_url: { required: true, type: string }
       authorization_receipt_base64: { required: true, type: string }
       authorization_signature_base64: { required: true, type: string }
       authorization_public_key_pem_base64: { required: true, type: string }
@@ -24,6 +23,7 @@ jobs:
     env:
       CAREFLOOR_EXECUTOR_SOURCE_SHA: 053fe13b864a129baf3d76d9d76d4ee984b12440
       CAREFLOOR_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+      CAREFLOOR_CANONICAL_URL: https://brainvi-carefloor.vercel.app
     steps:
       - name: Validate authorized release identity
         run: node -e 'if(process.env.GITHUB_REPOSITORY!=="BrainVI-AI/brainvi-monorepo"||!process.env.GITHUB_WORKFLOW_REF.includes("/.github/workflows/carefloor-production-release.yml@")||!/^[a-f0-9]{40}$/.test(process.env.CAREFLOOR_RELEASE_SOURCE_SHA))throw new Error("invalid migration caller")'
@@ -60,8 +60,6 @@ jobs:
           JS
       - name: Verify legal-hold contract compatibility floor
         if: ${{ hashFiles('apps/watchfloor/drizzle/0043_carefloor_legal_hold_generations_contract.sql') != '' }}
-        env:
-          CAREFLOOR_CANONICAL_URL: ${{ inputs.canonical_url }}
         run: |
           node --input-type=module <<'JS'
           const response=await fetch(`${process.env.CAREFLOOR_CANONICAL_URL}/api/version`,{cache:"no-store"});
