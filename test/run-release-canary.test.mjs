@@ -2,10 +2,22 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { runReleaseCanary } from "../.github/actions/run-release-canary/run-release-canary.mjs";
-import { generateKeyPairSync, sign } from "node:crypto";
-import { runpodConfigurationSha256 } from "../.github/actions/verify-control-plane/verify-control-plane.mjs";
+import { createHash, generateKeyPairSync, sign } from "node:crypto";
+import {
+  canonicalSha256,
+  runpodConfigurationSha256,
+} from "../.github/actions/verify-control-plane/verify-control-plane.mjs";
 
 const executionKeys = generateKeyPairSync("ed25519");
+const jacksonExecutionKeys = generateKeyPairSync("ed25519");
+const releaseModels = [
+  { id: "pose", capability: "person_pose_tracking" },
+  { id: "mask", capability: "scene_segmentation" },
+  { id: "gait", capability: "gait_motion" },
+  { id: "body", capability: "body_affect" },
+  { id: "t1", capability: "facial_affect" },
+  { id: "forecast", capability: "action_forecast" },
+];
 
 const jacksonImage = `ghcr.io/brainvi-ai/brainvi-carefloor-jackson@sha256:${"c".repeat(64)}`;
 const maryImage = `ghcr.io/brainvi-ai/brainvi-watchfloor-perception@sha256:${"d".repeat(64)}`;
@@ -58,6 +70,15 @@ const environment = () => ({
     jacksonEndpoint,
     templates["jackson-template"],
   ),
+  CAREFLOOR_JACKSON_WORKER_EXECUTION_PUBLIC_KEY_PEM:
+    jacksonExecutionKeys.publicKey.export({ type: "spki", format: "pem" }),
+  CAREFLOOR_JACKSON_MODEL: "brainvi-jackson",
+  CAREFLOOR_JACKSON_MODEL_REVISION: "f".repeat(40),
+  CAREFLOOR_JACKSON_MODEL_SHA256: "1".repeat(64),
+  CAREFLOOR_JACKSON_RUNTIME_SHA256: "2".repeat(64),
+  CAREFLOOR_JACKSON_CONFIG_SHA256: "3".repeat(64),
+  CAREFLOOR_JACKSON_RIGHTS_ARTIFACT_SHA256: "4".repeat(64),
+  CAREFLOOR_JACKSON_NETWORK_VOLUME_MANIFEST_SHA256: "5".repeat(64),
   CAREFLOOR_T1_RUNPOD_API_KEY: "t1-inference-key",
   CAREFLOOR_T1_RUNPOD_ENDPOINT_ID: "t1-endpoint",
   CAREFLOOR_T1_RUNPOD_IMAGE: t1Image,
@@ -69,7 +90,13 @@ const environment = () => ({
   RUNNER_TEMP: "/tmp",
 });
 
-function fixture({ canaryStatus = 200, invalidReceipt = false, invalidExecution = false } = {}) {
+function fixture({
+  canaryStatus = 200,
+  invalidReceipt = false,
+  invalidExecution = false,
+  invalidJacksonExecution = false,
+  invalidT1Evidence = false,
+} = {}) {
   const endpoints = [structuredClone(maryEndpoint), structuredClone(jacksonEndpoint), structuredClone(t1Endpoint)];
   const calls = [];
   const fetcher = async (input, init = {}) => {
@@ -86,26 +113,96 @@ function fixture({ canaryStatus = 200, invalidReceipt = false, invalidExecution 
       return Response.json(endpoint);
     }
     if (url.pathname.endsWith("/status/mary-job")) {
+      const output = {
+        subjectTrackId: "release-track",
+        annotations: invalidT1Evidence
+          ? []
+          : [
+              {
+                id: "facial-affect",
+                family: "displayed_affect",
+                label: "facial_valence_arousal",
+                state: "provisional",
+                sourceTrackIds: ["release-track"],
+                confidence: 0.8,
+                measurement: {
+                  unit: "normalized_affect_axis",
+                  values: { valence: 0.2, arousal: 0.4 },
+                },
+              },
+            ],
+        frame: {
+          outputs: [
+            {
+              modelRelease: releaseModels.find(
+                ({ capability }) => capability === "facial_affect",
+              ),
+              capability: "facial_affect",
+              annotationIds: ["facial-affect"],
+              quality: invalidT1Evidence ? "unavailable" : "provisional",
+            },
+          ],
+        },
+      };
       const receipt = {
         schema: "brainvi.carefloor.worker-execution-receipt.v1",
         attestationAuthority: "worker_origin",
         requestSha256: "1".repeat(64),
         workerImageDigest: `sha256:${"d".repeat(64)}`,
-        modelReleases: [{ id: "release" }],
+        modelReleases: releaseModels,
         jobId: "mary-job",
         completedAt: new Date().toISOString(),
-        outputSha256: "2".repeat(64),
+        outputSha256: canonicalSha256(output),
       };
       return Response.json({
         id: "mary-job",
         status: "COMPLETED",
         output: {
+          ...output,
           executionReceipt: {
             ...receipt,
             signature: invalidExecution
               ? Buffer.alloc(64).toString("base64")
               : sign(null, Buffer.from(JSON.stringify(receipt)), executionKeys.privateKey).toString("base64"),
           },
+        },
+      });
+    }
+    if (url.pathname.endsWith("/openai/v1/chat/completions")) {
+      const request = JSON.parse(init.body);
+      const requestRaw = Buffer.from(request.brainviRequestBase64, "base64");
+      const output = {
+        choices: [{ message: { content: "{}" } }],
+      };
+      const outputRaw = Buffer.from(JSON.stringify(output));
+      const receipt = {
+        schema: "brainvi.carefloor.jackson-execution-receipt.v1",
+        attestationAuthority: "worker_origin",
+        endpointId: "jackson-endpoint",
+        workerImageDigest: `sha256:${"c".repeat(64)}`,
+        model: "brainvi-jackson",
+        modelRevision: "f".repeat(40),
+        modelSha256: "1".repeat(64),
+        runtimeSha256: "2".repeat(64),
+        configSha256: "3".repeat(64),
+        rightsArtifactSha256: "4".repeat(64),
+        networkVolumeManifestSha256: "5".repeat(64),
+        requestSha256: createHash("sha256").update(requestRaw).digest("hex"),
+        outputSha256: createHash("sha256").update(outputRaw).digest("hex"),
+        completedAt: new Date().toISOString(),
+      };
+      return Response.json({
+        ...output,
+        brainviOutputBase64: outputRaw.toString("base64"),
+        executionReceipt: {
+          ...receipt,
+          signature: invalidJacksonExecution
+            ? Buffer.alloc(64).toString("base64")
+            : sign(
+                null,
+                Buffer.from(JSON.stringify(receipt)),
+                jacksonExecutionKeys.privateKey,
+              ).toString("base64"),
         },
       });
     }
@@ -137,10 +234,43 @@ function fixture({ canaryStatus = 200, invalidReceipt = false, invalidExecution 
                   documentationState: "clinical_assessment_complete",
                   maryJobId: "mary-job",
                   maryRequestSha256: "1".repeat(64),
-                  maryOutputSha256: "2".repeat(64),
+                  maryOutputSha256: canonicalSha256({
+                    subjectTrackId: "release-track",
+                    annotations: invalidT1Evidence
+                      ? []
+                      : [
+                          {
+                            id: "facial-affect",
+                            family: "displayed_affect",
+                            label: "facial_valence_arousal",
+                            state: "provisional",
+                            sourceTrackIds: ["release-track"],
+                            confidence: 0.8,
+                            measurement: {
+                              unit: "normalized_affect_axis",
+                              values: { valence: 0.2, arousal: 0.4 },
+                            },
+                          },
+                        ],
+                    frame: {
+                      outputs: [
+                        {
+                          modelRelease: releaseModels.find(
+                            ({ capability }) =>
+                              capability === "facial_affect",
+                          ),
+                          capability: "facial_affect",
+                          annotationIds: ["facial-affect"],
+                          quality: invalidT1Evidence
+                            ? "unavailable"
+                            : "provisional",
+                        },
+                      ],
+                    },
+                  }),
                   jacksonReceiptId: "3".repeat(64),
                   fhirTransactionSha256: "4".repeat(64),
-                  maryModelReleaseIds: ["a", "b", "c", "d", "e", "f"],
+                  maryModelReleaseIds: releaseModels.map(({ id }) => id),
                   completedAt: new Date().toISOString(),
                 }),
           },
@@ -192,6 +322,32 @@ test("rejects an unverified MARY execution and closes capacity", async () => {
   const { endpoints, fetcher } = fixture({ invalidExecution: true });
   await assert.rejects(runReleaseCanary(environment(), fetcher, async () => {}), /execution receipt is invalid/);
   assert.ok(endpoints.every(({ workersMin, workersMax }) => workersMin === 0 && workersMax === 0));
+});
+
+test("rejects a signed MARY result without source-bound T1 evidence", async () => {
+  const { endpoints, fetcher } = fixture({ invalidT1Evidence: true });
+  await assert.rejects(
+    runReleaseCanary(environment(), fetcher, async () => {}),
+    /T1 evidence is invalid/,
+  );
+  assert.ok(
+    endpoints.every(
+      ({ workersMin, workersMax }) => workersMin === 0 && workersMax === 0,
+    ),
+  );
+});
+
+test("rejects an unverified independent Jackson execution", async () => {
+  const { endpoints, fetcher } = fixture({ invalidJacksonExecution: true });
+  await assert.rejects(
+    runReleaseCanary(environment(), fetcher, async () => {}),
+    /Jackson canary execution receipt is invalid/,
+  );
+  assert.ok(
+    endpoints.every(
+      ({ workersMin, workersMax }) => workersMin === 0 && workersMax === 0,
+    ),
+  );
 });
 
 test("refuses an endpoint that is not exact-zero Carefloor capacity", async () => {
