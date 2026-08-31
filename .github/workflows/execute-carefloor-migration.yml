@@ -8,6 +8,7 @@ on:
       artifact_sha256: { required: true, type: string }
       migration_authorization_sha256: { required: true, type: string }
       deployment_url: { required: true, type: string }
+      canonical_url: { required: true, type: string }
       authorization_receipt_base64: { required: true, type: string }
       authorization_signature_base64: { required: true, type: string }
       authorization_public_key_pem_base64: { required: true, type: string }
@@ -65,6 +66,17 @@ jobs:
           const receipt=JSON.parse(raw), expected={schema:"brainvi.carefloor.migration-authorization.v1",sourceSha:process.env.CAREFLOOR_RELEASE_SOURCE_SHA,candidateManifestSha256:process.env.CANDIDATE_SHA256,vercelArtifactSha256:process.env.ARTIFACT_SHA256,migrationAuthorizationSha256:process.env.AUTHORIZATION_SHA256,deploymentUrl:process.env.DEPLOYMENT_URL,callerRunId:process.env.GITHUB_RUN_ID,callerRunAttempt:process.env.GITHUB_RUN_ATTEMPT};
           for(const [field,value] of Object.entries(expected))if(String(receipt[field])!==String(value))throw new Error(`Migration authorization mismatch: ${field}`);
           if(Date.now()>Date.parse(receipt.expiresAt)||receipt.nonce!==`${receipt.callerRunId}:${receipt.callerRunAttempt}:${receipt.migrationAuthorizationSha256}`)throw new Error("Migration authorization expired or replayed");
+          JS
+      - name: Verify legal-hold contract compatibility floor
+        if: ${{ hashFiles('apps/watchfloor/drizzle/0043_carefloor_legal_hold_generations_contract.sql') != '' }}
+        env:
+          CAREFLOOR_CANONICAL_URL: ${{ inputs.canonical_url }}
+        run: |
+          node --input-type=module <<'JS'
+          const response=await fetch(`${process.env.CAREFLOOR_CANONICAL_URL}/api/version`,{cache:"no-store"});
+          if(!response.ok)throw new Error("Canonical compatibility floor unavailable");
+          const version=await response.json();
+          if(version.compatibility?.legalHoldGenerations!=="expand-contract-v1")throw new Error("Canonical Carefloor is not compatible with the legal-hold contract migration");
           JS
       - name: Apply pinned production migrations
         working-directory: apps/watchfloor

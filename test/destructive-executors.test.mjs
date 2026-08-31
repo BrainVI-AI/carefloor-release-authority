@@ -17,3 +17,12 @@ for (const name of ["migration", "retention"]) {
     assert.match(workflow, /environment: carefloor-(?:production-migration|retention)/);
   });
 }
+
+test("migration executor preserves the canonical expand-contract gate", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/execute-carefloor-migration.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(workflow, /0043_carefloor_legal_hold_generations_contract\.sql/);
+  assert.match(workflow, /legalHoldGenerations!=="expand-contract-v1"/);
+});
