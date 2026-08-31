@@ -18,6 +18,23 @@ for (const name of ["migration", "retention"]) {
   });
 }
 
+test("destructive scope comes only from authority environment secrets", async () => {
+  for (const name of ["migration", "retention"]) {
+    const workflow = await readFile(
+      new URL(`../.github/workflows/execute-carefloor-${name}.yml`, import.meta.url),
+      "utf8",
+    );
+    assert.doesNotMatch(workflow, /inputs\.(?:tenant_id|b2_|ledger_retention|worker_batch|backup_retention)/);
+    assert.match(workflow, /GITHUB_REPOSITORY!=="BrainVI-AI\/brainvi-monorepo"/);
+  }
+  const retention = await readFile(
+    new URL("../.github/workflows/execute-carefloor-retention.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(retention, /backblazeb2/);
+  assert.match(retention, /secrets\.B2_BUCKET/);
+});
+
 test("migration executor preserves the canonical expand-contract gate", async () => {
   const workflow = await readFile(
     new URL("../.github/workflows/execute-carefloor-migration.yml", import.meta.url),

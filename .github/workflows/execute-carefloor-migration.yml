@@ -12,15 +12,6 @@ on:
       authorization_receipt_base64: { required: true, type: string }
       authorization_signature_base64: { required: true, type: string }
       authorization_public_key_pem_base64: { required: true, type: string }
-      tenant_id: { required: true, type: string }
-      ledger_retention_policy_json: { required: true, type: string }
-      ledger_retention_policy_sha256: { required: true, type: string }
-      ledger_retention_policy_signature: { required: true, type: string }
-      ledger_retention_policy_public_key_pem: { required: true, type: string }
-    secrets:
-      CAREFLOOR_DATABASE_URL: { required: true }
-      CAREFLOOR_DATABASE_URL_UNPOOLED: { required: true }
-      CAREFLOOR_LEDGER_RETENTION_CAPABILITY_KEY: { required: true }
 
 permissions:
   contents: read
@@ -35,7 +26,7 @@ jobs:
       CAREFLOOR_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
     steps:
       - name: Validate authorized release identity
-        run: node -e 'if(!/^[a-f0-9]{40}$/.test(process.env.CAREFLOOR_RELEASE_SOURCE_SHA))throw new Error("invalid release source")'
+        run: node -e 'if(process.env.GITHUB_REPOSITORY!=="BrainVI-AI/brainvi-monorepo"||!process.env.GITHUB_WORKFLOW_REF.includes("/.github/workflows/carefloor-production-release.yml@")||!/^[a-f0-9]{40}$/.test(process.env.CAREFLOOR_RELEASE_SOURCE_SHA))throw new Error("invalid migration caller")'
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: BrainVI-AI/brainvi-monorepo
@@ -82,13 +73,13 @@ jobs:
         working-directory: apps/watchfloor
         env:
           NODE_ENV: production
-          CAREFLOOR_TENANT_ID: ${{ inputs.tenant_id }}
+          CAREFLOOR_TENANT_ID: ${{ secrets.CAREFLOOR_TENANT_ID }}
           CAREFLOOR_DATABASE_URL: ${{ secrets.CAREFLOOR_DATABASE_URL }}
           CAREFLOOR_DATABASE_URL_UNPOOLED: ${{ secrets.CAREFLOOR_DATABASE_URL_UNPOOLED }}
-          CAREFLOOR_LEDGER_RETENTION_POLICY_JSON: ${{ inputs.ledger_retention_policy_json }}
-          CAREFLOOR_LEDGER_RETENTION_POLICY_SHA256: ${{ inputs.ledger_retention_policy_sha256 }}
-          CAREFLOOR_LEDGER_RETENTION_POLICY_SIGNATURE: ${{ inputs.ledger_retention_policy_signature }}
-          CAREFLOOR_LEDGER_RETENTION_POLICY_PUBLIC_KEY_PEM: ${{ inputs.ledger_retention_policy_public_key_pem }}
+          CAREFLOOR_LEDGER_RETENTION_POLICY_JSON: ${{ secrets.CAREFLOOR_LEDGER_RETENTION_POLICY_JSON }}
+          CAREFLOOR_LEDGER_RETENTION_POLICY_SHA256: ${{ secrets.CAREFLOOR_LEDGER_RETENTION_POLICY_SHA256 }}
+          CAREFLOOR_LEDGER_RETENTION_POLICY_SIGNATURE: ${{ secrets.CAREFLOOR_LEDGER_RETENTION_POLICY_SIGNATURE }}
+          CAREFLOOR_LEDGER_RETENTION_POLICY_PUBLIC_KEY_PEM: ${{ secrets.CAREFLOOR_LEDGER_RETENTION_POLICY_PUBLIC_KEY_PEM }}
           CAREFLOOR_LEDGER_RETENTION_CAPABILITY_KEY: ${{ secrets.CAREFLOOR_LEDGER_RETENTION_CAPABILITY_KEY }}
         run: |
           mkdir -p ../../artifacts/carefloor-production-release
