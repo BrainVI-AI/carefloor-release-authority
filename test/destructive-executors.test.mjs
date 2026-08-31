@@ -75,6 +75,7 @@ test("Vercel deploy tooling is authority-owned and hash locked", async () => {
   const lock = await readFile(new URL("../package-lock.json", import.meta.url), "utf8");
   assert.match(workflow, /environment: carefloor-vercel-deployment/);
   assert.match(workflow, /repository: BrainVI-AI\/carefloor-release-authority/);
+  assert.match(workflow, /ref: edad04074c5c506f0a162b3889f0a44446388994/);
   assert.match(workflow, /npm ci --ignore-scripts --omit=dev/);
   assert.doesNotMatch(workflow, /npm install|pnpm exec|pnpm dlx/);
   assert.match(workflow, /secrets\.CAREFLOOR_VERCEL_AUTOMATION_BYPASS_SECRET/);
