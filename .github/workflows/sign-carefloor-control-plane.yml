@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   sign:
-    environment: carefloor-release-signing
+    environment: carefloor-release-signing-v2
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

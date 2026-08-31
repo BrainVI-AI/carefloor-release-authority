@@ -54,7 +54,7 @@ test("control-plane signing key is confined to the authority workflow", async ()
     new URL("../.github/workflows/sign-carefloor-control-plane.yml", import.meta.url),
     "utf8",
   );
-  assert.match(workflow, /environment: carefloor-release-signing/);
+  assert.match(workflow, /environment: carefloor-release-signing-v2/);
   assert.match(
     workflow,
     /secrets\.CAREFLOOR_CONTROL_PLANE_SIGNING_PRIVATE_KEY_PEM/,
@@ -73,12 +73,15 @@ test("Vercel deploy tooling is authority-owned and hash locked", async () => {
     "utf8",
   );
   const lock = await readFile(new URL("../package-lock.json", import.meta.url), "utf8");
-  assert.match(workflow, /environment: carefloor-vercel-deployment/);
+  assert.match(workflow, /environment: carefloor-vercel-deployment-v2/);
   assert.match(workflow, /repository: BrainVI-AI\/carefloor-release-authority/);
   assert.match(workflow, /ref: edad04074c5c506f0a162b3889f0a44446388994/);
   assert.match(workflow, /npm ci --ignore-scripts --omit=dev/);
   assert.doesNotMatch(workflow, /npm install|pnpm exec|pnpm dlx/);
   assert.match(workflow, /secrets\.CAREFLOOR_VERCEL_AUTOMATION_BYPASS_SECRET/);
   assert.match(workflow, /x-vercel-protection-bypass/);
+  assert.match(workflow, /CALLER_WORKFLOW_REF: \$\{\{ github\.workflow_ref \}\}/);
+  assert.match(workflow, /CALLER_WORKFLOW_SHA: \$\{\{ github\.workflow_sha \}\}/);
+  assert.match(workflow, /deployment caller workflow is not admitted/);
   assert.match(lock, /"vercel": "59\.10\.0"/);
 });

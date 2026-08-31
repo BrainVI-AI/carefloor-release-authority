@@ -24,7 +24,7 @@ permissions:
 
 jobs:
   deploy:
-    environment: carefloor-vercel-deployment
+    environment: carefloor-vercel-deployment-v2
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
@@ -38,6 +38,23 @@ jobs:
       VERCEL_ORG_ID: ${{ vars.CAREFLOOR_VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ vars.CAREFLOOR_VERCEL_PROJECT_ID }}
     steps:
+      - name: Validate caller
+        env:
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node <<'JS'
+          const { createHash } = require("node:crypto");
+          const match = /^BrainVI-AI\/brainvi-monorepo\/(\.github\/workflows\/carefloor-production-release\.yml)@/.exec(process.env.CALLER_WORKFLOW_REF ?? "");
+          if (process.env.GITHUB_REPOSITORY !== "BrainVI-AI/brainvi-monorepo" || !/^[a-f0-9]{40}$/.test(process.env.CALLER_WORKFLOW_SHA ?? "") || !match) throw new Error("invalid deployment caller");
+          const response = await fetch(`https://api.github.com/repos/BrainVI-AI/brainvi-monorepo/contents/${match[1]}?ref=${process.env.CALLER_WORKFLOW_SHA}`, { headers: { accept: "application/vnd.github+json", authorization: `Bearer ${process.env.GH_TOKEN}`, "x-github-api-version": "2022-11-28" }, redirect: "error", signal: AbortSignal.timeout(10_000) });
+          if (!response.ok) throw new Error("deployment caller workflow unavailable");
+          const body = await response.json();
+          const bytes = Buffer.from(String(body.content ?? "").replace(/\s/g, ""), "base64");
+          const normalized = bytes.toString("utf8").replace(/(BrainVI-AI\/carefloor-release-authority\/[^\s@]+)@[a-f0-9]{40}/g, "$1@AUTHORITY_SHA");
+          if (bytes.length > 100_000 || createHash("sha256").update(normalized).digest("hex") !== "8e82b6ceb9ebecd8a81094e72b6a9d9b255ab6fb5c54ba2ce805a170acd2f766") throw new Error("deployment caller workflow is not admitted");
+          JS
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: BrainVI-AI/carefloor-release-authority
