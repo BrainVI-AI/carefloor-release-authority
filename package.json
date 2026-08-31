@@ -1,0 +1,7 @@
+{
+  "name": "carefloor-release-authority",
+  "private": true,
+  "dependencies": {
+    "vercel": "48.10.2"
+  }
+}
