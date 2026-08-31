@@ -1,5 +1,5 @@
 import { appendFile, writeFile } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { createPublicKey, randomBytes, verify as verifySignature } from "node:crypto";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -96,6 +96,11 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
   const sourceSha = required(environment, "CAREFLOOR_RELEASE_SOURCE_SHA");
   const candidateManifestSha256 = required(environment, "WATCHFLOOR_CANDIDATE_MANIFEST_SHA256");
   const controlKey = required(environment, "CAREFLOOR_RUNPOD_CONTROL_API_KEY");
+  const maryExecutionPublicKey = createPublicKey(
+    required(environment, "CAREFLOOR_WORKER_EXECUTION_PUBLIC_KEY_PEM"),
+  );
+  if (maryExecutionPublicKey.asymmetricKeyType !== "ed25519")
+    throw new Error("MARY execution verification key is invalid");
   const lanes = [
     {
       label: "MARY",
@@ -218,6 +223,35 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
     );
     if (maryJob?.id !== transaction.maryJobId || maryJob?.status !== "COMPLETED")
       throw new Error("MARY canary job custody is invalid");
+    const execution = maryJob?.output?.executionReceipt;
+    const signedExecution = {
+      schema: execution?.schema,
+      attestationAuthority: execution?.attestationAuthority,
+      requestSha256: execution?.requestSha256,
+      workerImageDigest: execution?.workerImageDigest,
+      modelReleases: execution?.modelReleases,
+      jobId: execution?.jobId,
+      completedAt: execution?.completedAt,
+      outputSha256: execution?.outputSha256,
+    };
+    if (
+      execution?.schema !== "brainvi.carefloor.worker-execution-receipt.v1" ||
+      execution.attestationAuthority !== "worker_origin" ||
+      execution.requestSha256 !== transaction.maryRequestSha256 ||
+      execution.outputSha256 !== transaction.maryOutputSha256 ||
+      execution.jobId !== transaction.maryJobId ||
+      execution.workerImageDigest !== `sha256:${lanes.find(({ label }) => label === "MARY").expectedImage.split("@sha256:")[1]}` ||
+      !Array.isArray(execution.modelReleases) ||
+      !Number.isFinite(Date.parse(execution.completedAt ?? "")) ||
+      Date.parse(execution.completedAt) < startedAt.getTime() ||
+      typeof execution.signature !== "string" ||
+      !verifySignature(
+        null,
+        Buffer.from(JSON.stringify(signedExecution)),
+        maryExecutionPublicKey,
+        Buffer.from(execution.signature, "base64"),
+      )
+    ) throw new Error("MARY canary execution receipt is invalid");
   } catch (error) {
     failure = error;
   } finally {

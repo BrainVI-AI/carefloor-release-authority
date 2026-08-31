@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { runReleaseCanary } from "../.github/actions/run-release-canary/run-release-canary.mjs";
+import { generateKeyPairSync, sign } from "node:crypto";
 import { runpodConfigurationSha256 } from "../.github/actions/verify-control-plane/verify-control-plane.mjs";
+
+const executionKeys = generateKeyPairSync("ed25519");
 
 const jacksonImage = `ghcr.io/brainvi-ai/brainvi-carefloor-jackson@sha256:${"c".repeat(64)}`;
 const maryImage = `ghcr.io/brainvi-ai/brainvi-watchfloor-perception@sha256:${"d".repeat(64)}`;
@@ -40,6 +43,7 @@ const environment = () => ({
   CAREFLOOR_RELEASE_SOURCE_SHA: "a".repeat(40),
   WATCHFLOOR_CANDIDATE_MANIFEST_SHA256: "b".repeat(64),
   CAREFLOOR_RUNPOD_CONTROL_API_KEY: "control-key",
+  CAREFLOOR_WORKER_EXECUTION_PUBLIC_KEY_PEM: executionKeys.publicKey.export({ type: "spki", format: "pem" }),
   CAREFLOOR_RUNPOD_API_KEY: "mary-inference-key",
   CAREFLOOR_RUNPOD_ENDPOINT_ID: "mary-endpoint",
   CAREFLOOR_RUNPOD_IMAGE: maryImage,
@@ -65,7 +69,7 @@ const environment = () => ({
   RUNNER_TEMP: "/tmp",
 });
 
-function fixture({ canaryStatus = 200, invalidReceipt = false } = {}) {
+function fixture({ canaryStatus = 200, invalidReceipt = false, invalidExecution = false } = {}) {
   const endpoints = [structuredClone(maryEndpoint), structuredClone(jacksonEndpoint), structuredClone(t1Endpoint)];
   const calls = [];
   const fetcher = async (input, init = {}) => {
@@ -81,7 +85,30 @@ function fixture({ canaryStatus = 200, invalidReceipt = false } = {}) {
       if (init.method === "PATCH") Object.assign(endpoint, JSON.parse(init.body));
       return Response.json(endpoint);
     }
-    if (url.pathname.endsWith("/status/mary-job")) return Response.json({ id: "mary-job", status: "COMPLETED" });
+    if (url.pathname.endsWith("/status/mary-job")) {
+      const receipt = {
+        schema: "brainvi.carefloor.worker-execution-receipt.v1",
+        attestationAuthority: "worker_origin",
+        requestSha256: "1".repeat(64),
+        workerImageDigest: `sha256:${"d".repeat(64)}`,
+        modelReleases: [{ id: "release" }],
+        jobId: "mary-job",
+        completedAt: new Date().toISOString(),
+        outputSha256: "2".repeat(64),
+      };
+      return Response.json({
+        id: "mary-job",
+        status: "COMPLETED",
+        output: {
+          executionReceipt: {
+            ...receipt,
+            signature: invalidExecution
+              ? Buffer.alloc(64).toString("base64")
+              : sign(null, Buffer.from(JSON.stringify(receipt)), executionKeys.privateKey).toString("base64"),
+          },
+        },
+      });
+    }
     if (url.pathname.endsWith("/purge-queue")) return Response.json({ status: "completed" });
     if (url.pathname.endsWith("/health"))
       return Response.json({ workers: { idle: 0, running: 0 }, jobs: { inQueue: 0, inProgress: 0 } });
@@ -158,6 +185,12 @@ test("returns Jackson to exact zero when the deployed canary fails", async () =>
 test("rejects candidate schema-only self-attestation and closes capacity", async () => {
   const { endpoints, fetcher } = fixture({ invalidReceipt: true });
   await assert.rejects(runReleaseCanary(environment(), fetcher, async () => {}), /receipt is invalid/);
+  assert.ok(endpoints.every(({ workersMin, workersMax }) => workersMin === 0 && workersMax === 0));
+});
+
+test("rejects an unverified MARY execution and closes capacity", async () => {
+  const { endpoints, fetcher } = fixture({ invalidExecution: true });
+  await assert.rejects(runReleaseCanary(environment(), fetcher, async () => {}), /execution receipt is invalid/);
   assert.ok(endpoints.every(({ workersMin, workersMax }) => workersMin === 0 && workersMax === 0));
 });
 
