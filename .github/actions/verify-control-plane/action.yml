@@ -1,0 +1,8 @@
+name: Verify Carefloor control plane
+description: Verify digest-pinned bounded RunPod endpoints and Neon retention from the protected release authority.
+runs:
+  using: node24
+  main: verify-control-plane.mjs
+outputs:
+  receipt-path:
+    description: Absolute path to the verified control-plane receipt.

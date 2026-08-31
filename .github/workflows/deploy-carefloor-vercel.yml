@@ -1,0 +1,135 @@
+name: Deploy Carefloor Vercel Artifact
+
+on:
+  workflow_call:
+    inputs:
+      source_sha: { required: true, type: string }
+      candidate_sha256: { required: true, type: string }
+      artifact_sha256: { required: true, type: string }
+      build_artifact_name: { required: true, type: string }
+      admission_artifact_name: { required: true, type: string }
+    outputs:
+      deployment_url:
+        value: ${{ jobs.deploy.outputs.deployment_url }}
+      artifact_sha:
+        value: ${{ inputs.artifact_sha256 }}
+      migration_authorization_sha:
+        value: ${{ jobs.deploy.outputs.migration_authorization_sha }}
+
+permissions:
+  actions: read
+  attestations: write
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    environment: carefloor-vercel-deployment-v2
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      deployment_url: ${{ steps.deploy.outputs.deployment_url }}
+      migration_authorization_sha: ${{ steps.authorization.outputs.migration_authorization_sha }}
+    env:
+      CAREFLOOR_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+      WATCHFLOOR_CANDIDATE_MANIFEST_SHA256: ${{ inputs.candidate_sha256 }}
+      CAREFLOOR_VERCEL_ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+      CAREFLOOR_VERCEL_PROJECT_NAME: brainvi-carefloor
+      VERCEL_ORG_ID: ${{ vars.CAREFLOOR_VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.CAREFLOOR_VERCEL_PROJECT_ID }}
+    steps:
+      - name: Validate caller
+        env:
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
+          CALLER_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node <<'JS'
+          const { createHash } = require("node:crypto");
+          const match = /^BrainVI-AI\/brainvi-monorepo\/(\.github\/workflows\/carefloor-production-release\.yml)@/.exec(process.env.CALLER_WORKFLOW_REF ?? "");
+          if (process.env.GITHUB_REPOSITORY !== "BrainVI-AI/brainvi-monorepo" || !/^[a-f0-9]{40}$/.test(process.env.CALLER_WORKFLOW_SHA ?? "") || !match) throw new Error("invalid deployment caller");
+          const response = await fetch(`https://api.github.com/repos/BrainVI-AI/brainvi-monorepo/contents/${match[1]}?ref=${process.env.CALLER_WORKFLOW_SHA}`, { headers: { accept: "application/vnd.github+json", authorization: `Bearer ${process.env.GH_TOKEN}`, "x-github-api-version": "2022-11-28" }, redirect: "error", signal: AbortSignal.timeout(10_000) });
+          if (!response.ok) throw new Error("deployment caller workflow unavailable");
+          const body = await response.json();
+          const bytes = Buffer.from(String(body.content ?? "").replace(/\s/g, ""), "base64");
+          const normalized = bytes.toString("utf8").replace(/(BrainVI-AI\/carefloor-release-authority\/[^\s@]+)@[a-f0-9]{40}/g, "$1@AUTHORITY_SHA");
+          if (bytes.length > 100_000 || createHash("sha256").update(normalized).digest("hex") !== "8e82b6ceb9ebecd8a81094e72b6a9d9b255ab6fb5c54ba2ce805a170acd2f766") throw new Error("deployment caller workflow is not admitted");
+          JS
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: BrainVI-AI/carefloor-release-authority
+          ref: edad04074c5c506f0a162b3889f0a44446388994
+          persist-credentials: false
+      - name: Install hash-locked deploy tooling
+        run: npm ci --ignore-scripts --omit=dev
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.build_artifact_name }}
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.admission_artifact_name }}
+          path: artifacts/carefloor-production-release/admission
+      - name: Verify admission, artifact, and project binding
+        env:
+          CAREFLOOR_CONTROL_PLANE_SIGNING_PUBLIC_KEY_SHA256: ${{ vars.CAREFLOOR_CONTROL_PLANE_SIGNING_PUBLIC_KEY_SHA256 }}
+        run: |
+          node <<'JS'
+          const fs = require("node:fs");
+          const { createHash, createPublicKey, verify } = require("node:crypto");
+          const root = "artifacts/carefloor-production-release/admission/";
+          const raw = fs.readFileSync(root + "control-plane.json");
+          const publicDer = Buffer.from(fs.readFileSync(root + "control-plane.public.der.b64", "utf8").trim(), "base64");
+          const signature = Buffer.from(fs.readFileSync(root + "control-plane.signature", "utf8").trim(), "base64");
+          if (createHash("sha256").update(publicDer).digest("hex") !== process.env.CAREFLOOR_CONTROL_PLANE_SIGNING_PUBLIC_KEY_SHA256) throw new Error("Carefloor signed admission trust root mismatch");
+          if (!verify(null, raw, createPublicKey({ key: publicDer, type: "spki", format: "der" }), signature)) throw new Error("Carefloor signed admission is invalid");
+          const receipt = JSON.parse(raw);
+          if (receipt.sourceSha !== process.env.CAREFLOOR_RELEASE_SOURCE_SHA) throw new Error("Carefloor admission source mismatch");
+          const project = JSON.parse(fs.readFileSync(".vercel/project.json", "utf8"));
+          if (project.orgId !== process.env.VERCEL_ORG_ID || project.projectId !== process.env.VERCEL_PROJECT_ID || project.projectName !== process.env.CAREFLOOR_VERCEL_PROJECT_NAME) throw new Error("Vercel project binding mismatch");
+          fs.appendFileSync(process.env.GITHUB_ENV, [`CAREFLOOR_CONTROL_PLANE_RECEIPT_BASE64=${raw.toString("base64")}`,`CAREFLOOR_CONTROL_PLANE_RECEIPT_SIGNATURE=${signature.toString("base64")}`,`CAREFLOOR_CONTROL_PLANE_PUBLIC_KEY_DER_BASE64=${publicDer.toString("base64")}`,""].join("\n"));
+          JS
+          test "$(find .vercel/output -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f 1)" = "$CAREFLOOR_VERCEL_ARTIFACT_SHA256"
+      - name: Deploy exact production artifact
+        id: deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.CAREFLOOR_VERCEL_STAGE_TOKEN }}
+          CAREFLOOR_CONTROL_PLANE_REFRESH_SECRET: ${{ secrets.CAREFLOOR_CONTROL_PLANE_REFRESH_SECRET }}
+          CAREFLOOR_RELEASE_CANARY_SECRET: ${{ secrets.CAREFLOOR_RELEASE_CANARY_SECRET }}
+        run: |
+          DEPLOYMENT_URL="$(./node_modules/.bin/vercel deploy --prebuilt --prod --skip-domain --token="$VERCEL_TOKEN" \
+            --env WATCHFLOOR_CANDIDATE_GIT_HEAD="$CAREFLOOR_RELEASE_SOURCE_SHA" \
+            --env WATCHFLOOR_CANDIDATE_MANIFEST_SHA256="$WATCHFLOOR_CANDIDATE_MANIFEST_SHA256" \
+            --env CAREFLOOR_STANDALONE=true \
+            --env CAREFLOOR_DEMO_MODE=false \
+            --env CAREFLOOR_PUBLIC_DEMO_DEPLOYMENT=false \
+            --env CAREFLOOR_CONTROL_PLANE_RECEIPT_BASE64="$CAREFLOOR_CONTROL_PLANE_RECEIPT_BASE64" \
+            --env CAREFLOOR_CONTROL_PLANE_RECEIPT_SIGNATURE="$CAREFLOOR_CONTROL_PLANE_RECEIPT_SIGNATURE" \
+            --env CAREFLOOR_CONTROL_PLANE_PUBLIC_KEY_DER_BASE64="$CAREFLOOR_CONTROL_PLANE_PUBLIC_KEY_DER_BASE64" \
+            --env CAREFLOOR_CONTROL_PLANE_REFRESH_SECRET="$CAREFLOOR_CONTROL_PLANE_REFRESH_SECRET" \
+            --env CAREFLOOR_RELEASE_CANARY_SECRET="$CAREFLOOR_RELEASE_CANARY_SECRET" \
+            --meta carefloorSourceSha="$CAREFLOOR_RELEASE_SOURCE_SHA" \
+            --meta carefloorArtifactSha256="$CAREFLOOR_VERCEL_ARTIFACT_SHA256")"
+          echo "deployment_url=$DEPLOYMENT_URL" >> "$GITHUB_OUTPUT"
+          echo "CAREFLOOR_DEPLOYMENT_URL=$DEPLOYMENT_URL" >> "$GITHUB_ENV"
+      - name: Verify production source binding
+        env:
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.CAREFLOOR_VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: node -e 'const secret=process.env.VERCEL_AUTOMATION_BYPASS_SECRET;fetch(process.env.CAREFLOOR_DEPLOYMENT_URL+"/api/version",{headers:secret?{"x-vercel-protection-bypass":secret}:{}}).then(async r=>{if(!r.ok)throw new Error("version unavailable");const v=await r.json();if(v.gitHead!==process.env.CAREFLOOR_RELEASE_SOURCE_SHA||v.candidateManifestSha256!==process.env.WATCHFLOOR_CANDIDATE_MANIFEST_SHA256)throw new Error("deployment binding mismatch");require("node:fs").writeFileSync("artifacts/carefloor-production-release/deployment.json",JSON.stringify(v))})'
+      - name: Bind pre-migration authorization
+        id: authorization
+        run: |
+          node -e 'const fs=require("node:fs");fs.writeFileSync("artifacts/carefloor-production-release/pre-migration.json",JSON.stringify({schema:"brainvi.carefloor.pre-migration.v1",sourceSha:process.env.CAREFLOOR_RELEASE_SOURCE_SHA,candidateManifestSha256:process.env.WATCHFLOOR_CANDIDATE_MANIFEST_SHA256,vercelArtifactSha256:process.env.CAREFLOOR_VERCEL_ARTIFACT_SHA256,deploymentUrl:process.env.CAREFLOOR_DEPLOYMENT_URL}))'
+          MIGRATION_AUTHORIZATION_SHA="$(sha256sum artifacts/carefloor-production-release/pre-migration.json | cut -d ' ' -f 1)"
+          echo "migration_authorization_sha=$MIGRATION_AUTHORIZATION_SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: carefloor-staged-${{ inputs.source_sha }}
+          path: |
+            artifacts/carefloor-production-release/vercel-artifact.json
+            artifacts/carefloor-production-release/deployment.json
+            artifacts/carefloor-production-release/pre-migration.json
+          if-no-files-found: error
+          retention-days: 90
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: artifacts/carefloor-production-release/pre-migration.json

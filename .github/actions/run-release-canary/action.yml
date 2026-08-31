@@ -1,0 +1,12 @@
+name: Run bounded Carefloor release canary
+description: Exercise the deployed Carefloor transaction while keeping RunPod management authority outside candidate code.
+runs:
+  using: node24
+  main: run-release-canary.mjs
+outputs:
+  transaction-path:
+    description: Absolute path to the release transaction receipt.
+  cost-path:
+    description: Absolute path to the bounded live MARY, T1, and Jackson capacity receipt.
+  ga-validation-path:
+    description: Absolute path to the runtime GA evidence validation receipt.
