@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: BrainVI-AI/carefloor-release-authority
-          ref: b455ceb36d260cdc2f2c4d92bc7259939ae4a8c5
+          ref: edad040864df48023d9197836d77186605225024
           persist-credentials: false
       - name: Install hash-locked deploy tooling
         run: npm ci --ignore-scripts --omit=dev
