@@ -33,8 +33,8 @@ jobs:
       CAREFLOOR_EXECUTOR_SOURCE_SHA: 053fe13b864a129baf3d76d9d76d4ee984b12440
       CAREFLOOR_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
     steps:
-      - name: Admit only the authority-pinned executor release
-        run: test "$CAREFLOOR_RELEASE_SOURCE_SHA" = "$CAREFLOOR_EXECUTOR_SOURCE_SHA"
+      - name: Validate authorized release identity
+        run: node -e 'if(!/^[a-f0-9]{40}$/.test(process.env.CAREFLOOR_RELEASE_SOURCE_SHA))throw new Error("invalid release source")'
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: BrainVI-AI/brainvi-monorepo

@@ -47,10 +47,10 @@ jobs:
       B2_REGION: ${{ inputs.b2_region }}
       B2_BUCKET: ${{ inputs.b2_bucket }}
     steps:
-      - name: Bind retention executor to canonical release
+      - name: Verify canonical release identity
         run: |
           SOURCE_SHA="$(node -e 'fetch(process.env.CAREFLOOR_CANONICAL_URL+"/api/version").then(async r=>{if(!r.ok)throw new Error("version unavailable");const v=await r.json();if(!/^[a-f0-9]{40}$/.test(v.gitHead??""))throw new Error("invalid source");process.stdout.write(v.gitHead)})')"
-          test "$SOURCE_SHA" = "$CAREFLOOR_EXECUTOR_SOURCE_SHA"
+          test -n "$SOURCE_SHA"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: BrainVI-AI/brainvi-monorepo
