@@ -1,0 +1,63 @@
+name: Sign Carefloor Control Plane
+
+on:
+  workflow_call:
+    inputs:
+      source_sha: { required: true, type: string }
+      input_artifact_name: { required: true, type: string }
+      output_artifact_name: { required: true, type: string }
+
+permissions:
+  actions: read
+  attestations: write
+  contents: read
+  id-token: write
+
+jobs:
+  sign:
+    environment: carefloor-release-signing
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Validate caller
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+        run: node -e 'if(process.env.GITHUB_REPOSITORY!=="BrainVI-AI/brainvi-monorepo"||!/^[a-f0-9]{40}$/.test(process.env.SOURCE_SHA))throw new Error("invalid signing caller")'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.input_artifact_name }}
+          path: /tmp/carefloor-control-plane-input
+      - name: Sign admitted control plane
+        env:
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          CAREFLOOR_CONTROL_PLANE_SIGNING_PRIVATE_KEY_PEM: ${{ secrets.CAREFLOOR_CONTROL_PLANE_SIGNING_PRIVATE_KEY_PEM }}
+          CAREFLOOR_CONTROL_PLANE_SIGNING_PUBLIC_KEY_SHA256: ${{ vars.CAREFLOOR_CONTROL_PLANE_SIGNING_PUBLIC_KEY_SHA256 }}
+        run: |
+          node <<'JS'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const { createHash, createPrivateKey, createPublicKey, sign } = require("node:crypto");
+          const files = fs.readdirSync("/tmp/carefloor-control-plane-input").filter((name) => name.endsWith("control-plane.json"));
+          if (files.length !== 1) throw new Error("Carefloor control-plane receipt is ambiguous");
+          const raw = fs.readFileSync(path.join("/tmp/carefloor-control-plane-input", files[0]));
+          const receipt = JSON.parse(raw);
+          if (receipt.schema !== "brainvi.carefloor.control-plane-release.v1" || receipt.sourceSha !== process.env.SOURCE_SHA || !Array.isArray(receipt.runpod) || !Number.isFinite(Date.parse(receipt.verifiedAt)) || Date.parse(receipt.validUntil) <= Date.now()) throw new Error("invalid control-plane receipt");
+          const privateKey = createPrivateKey(process.env.CAREFLOOR_CONTROL_PLANE_SIGNING_PRIVATE_KEY_PEM);
+          const publicDer = createPublicKey(privateKey).export({ type: "spki", format: "der" });
+          if (createHash("sha256").update(publicDer).digest("hex") !== process.env.CAREFLOOR_CONTROL_PLANE_SIGNING_PUBLIC_KEY_SHA256) throw new Error("Carefloor signing trust root mismatch");
+          const signature = sign(null, raw, privateKey).toString("base64");
+          fs.mkdirSync("/tmp/carefloor-control-plane-output", { recursive: true });
+          fs.writeFileSync("/tmp/carefloor-control-plane-output/control-plane.json", raw);
+          fs.writeFileSync("/tmp/carefloor-control-plane-output/control-plane.signature", signature);
+          fs.writeFileSync("/tmp/carefloor-control-plane-output/control-plane.public.der.b64", publicDer.toString("base64"));
+          fs.writeFileSync("/tmp/carefloor-control-plane-output/carefloor-control-plane-envelope.json", JSON.stringify({ receiptBase64: raw.toString("base64"), signature }));
+          JS
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be
+        with:
+          subject-path: /tmp/carefloor-control-plane-output/*
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ inputs.output_artifact_name }}
+          path: /tmp/carefloor-control-plane-output/
+          if-no-files-found: error
+          retention-days: 7

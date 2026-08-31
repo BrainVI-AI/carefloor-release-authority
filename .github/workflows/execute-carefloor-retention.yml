@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      CAREFLOOR_EXECUTOR_SOURCE_SHA: 053fe13b864a129baf3d76d9d76d4ee984b12440
+      CAREFLOOR_EXECUTOR_SOURCE_SHA: da4791ca32ee587e7e2b230f1780086b18d5c9ea
       CAREFLOOR_CANONICAL_URL: ${{ inputs.canonical_url }}
       NODE_ENV: production
       CAREFLOOR_TENANT_ID: ${{ secrets.CAREFLOOR_TENANT_ID }}

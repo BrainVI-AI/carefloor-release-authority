@@ -306,6 +306,15 @@ test("opens bounded MARY, T1, and Jackson capacity and leaves the admitted relea
   assert.ok(!calls.some(([method, url]) => method === "POST" && url.endsWith("/purge-queue")));
 });
 
+test("revalidates an already-live release without requiring a zero-capacity outage", async () => {
+  const { calls, endpoints, fetcher } = fixture();
+  endpoints.forEach((endpoint) => { endpoint.workersMax = 1; });
+  const result = await runReleaseCanary(environment(), fetcher, async () => {});
+  assert.equal(result.cost.state, "validated_live");
+  assert.ok(endpoints.every(({ workersMax }) => workersMax === 1));
+  assert.ok(!calls.some(([method, url]) => method === "PATCH" && url.includes("/v1/endpoints/")));
+});
+
 test("returns Jackson to exact zero when the deployed canary fails", async () => {
   const { endpoints, fetcher } = fixture({ canaryStatus: 500 });
   await assert.rejects(runReleaseCanary(environment(), fetcher, async () => {}), /canary failed/);
@@ -350,8 +359,9 @@ test("rejects an unverified independent Jackson execution", async () => {
   );
 });
 
-test("refuses an endpoint that is not exact-zero Carefloor capacity", async () => {
-  const { endpoints, fetcher } = fixture();
-  endpoints[0].workersMax = 1;
-  await assert.rejects(runReleaseCanary(environment(), fetcher, async () => {}), /standby boundary/);
+test("restores already-live capacity when a repeat-release canary fails", async () => {
+  const { endpoints, fetcher } = fixture({ canaryStatus: 500 });
+  endpoints.forEach((endpoint) => { endpoint.workersMax = 1; });
+  await assert.rejects(runReleaseCanary(environment(), fetcher, async () => {}), /canary failed/);
+  assert.ok(endpoints.every(({ workersMax }) => workersMax === 1));
 });

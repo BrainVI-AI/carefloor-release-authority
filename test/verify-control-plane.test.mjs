@@ -133,6 +133,14 @@ test("admits the exact bounded GA serving configuration against the standby hash
   assert.ok(receipt.runpod.every(({ workersMax }) => workersMax === 1));
 });
 
+test("records either bounded incumbent capacity for repeatable release admission", async () => {
+  const fixture = controlPlaneFixture();
+  fixture.environment.CAREFLOOR_RUNPOD_EXPECTED_WORKERS_MAX = "incumbent";
+  fixture.endpoints[0].workersMax = 1;
+  const receipt = await verifyControlPlane(fixture.environment, fixture.fetcher);
+  assert.deepEqual(receipt.runpod.map(({ workersMax }) => workersMax), [1, 0]);
+});
+
 test("rejects an inference key that can manage the RunPod account", async () => {
   const fixture = controlPlaneFixture();
   Object.assign(fixture.environment, {

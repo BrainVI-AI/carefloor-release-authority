@@ -183,24 +183,26 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
     throw new Error("Carefloor deployed candidate binding mismatch");
 
   const inventory = await runpodRequest(fetcher, controlKey, "GET", "endpoints");
+  const previousWorkersMax = new Map();
   for (const lane of lanes) {
     const standby = endpointFromInventory(inventory, lane.endpointId, lane.label);
-    assertCapacity(standby, 0, `${lane.label} standby`);
+    if (standby.workersMin !== 0 || ![0, 1].includes(standby.workersMax))
+      throw new Error(`${lane.label} incumbent boundary is invalid`);
+    previousWorkersMax.set(lane.endpointId, standby.workersMax);
     if (!SAFE_ID.test(standby.templateId ?? ""))
       throw new Error(`${lane.label} template binding is invalid`);
     const template = await runpodRequest(fetcher, controlKey, "GET", `templates/${standby.templateId}`);
-    if (template?.imageName !== lane.expectedImage || runpodConfigurationSha256(standby, template) !== lane.expectedConfigurationSha256)
+    if (template?.imageName !== lane.expectedImage || runpodConfigurationSha256({ ...standby, workersMin: 0, workersMax: 0 }, template) !== lane.expectedConfigurationSha256)
       throw new Error(`${lane.label} release configuration drifted after admission`);
   }
   const startedAt = new Date();
   const releaseCanaryNonce = randomBytes(32).toString("hex");
-  const opened = [];
   let result;
   let failure;
   try {
     for (const lane of lanes) {
-      await runpodRequest(fetcher, controlKey, "PATCH", `endpoints/${lane.endpointId}`, { workersMin: 0, workersMax: 1 });
-      opened.push(lane);
+      if (previousWorkersMax.get(lane.endpointId) === 0)
+        await runpodRequest(fetcher, controlKey, "PATCH", `endpoints/${lane.endpointId}`, { workersMin: 0, workersMax: 1 });
       assertCapacity(await runpodRequest(fetcher, controlKey, "GET", `endpoints/${lane.endpointId}`), 1, `${lane.label} bounded canary`);
     }
     const jackson = lanes.find(({ label }) => label === "Jackson");
@@ -424,23 +426,32 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
   } catch (error) {
     failure = error;
   } finally {
-    for (const lane of failure ? opened.reverse() : []) {
+    for (const lane of failure ? [...lanes].reverse() : []) {
       try {
-        await readJson(
-          await fetcher(`https://api.runpod.ai/v2/${lane.endpointId}/purge-queue`, {
-            method: "POST",
-            headers: { authorization: `Bearer ${lane.inferenceKey}` },
-            cache: "no-store",
-            redirect: "error",
-            signal: AbortSignal.timeout(30_000),
-          }),
-          "RunPod queue purge",
-        );
-        await runpodRequest(fetcher, controlKey, "PATCH", `endpoints/${lane.endpointId}`, {
-          workersMin: 0,
-          workersMax: 0,
-        });
-        await verifyExactZero(fetcher, controlKey, lane, wait);
+        const previous = previousWorkersMax.get(lane.endpointId);
+        if (previous === 0) {
+          await readJson(
+            await fetcher(`https://api.runpod.ai/v2/${lane.endpointId}/purge-queue`, {
+              method: "POST",
+              headers: { authorization: `Bearer ${lane.inferenceKey}` },
+              cache: "no-store",
+              redirect: "error",
+              signal: AbortSignal.timeout(30_000),
+            }),
+            "RunPod queue purge",
+          );
+          await runpodRequest(fetcher, controlKey, "PATCH", `endpoints/${lane.endpointId}`, {
+            workersMin: 0,
+            workersMax: 0,
+          });
+          await verifyExactZero(fetcher, controlKey, lane, wait);
+        } else {
+          assertCapacity(
+            await runpodRequest(fetcher, controlKey, "GET", `endpoints/${lane.endpointId}`),
+            1,
+            `${lane.label} restored live`,
+          );
+        }
       } catch (error) {
         failure = failure ?? error;
       }
@@ -459,6 +470,7 @@ export async function runReleaseCanary(environment, fetcher = fetch, wait = (ms)
       workersMin: 0,
       workersMax: 1,
       exactZero: false,
+      previousWorkersMax: Object.fromEntries(previousWorkersMax),
       state: "validated_live",
     },
   };

@@ -216,8 +216,9 @@ export async function verifyControlPlane(environment, fetcher = fetch, now = new
   const tenantId = required(environment, "CAREFLOOR_TENANT_ID");
   if (!/^[a-f0-9]{40}$/.test(sourceSha)) throw new Error("Carefloor release source SHA is invalid");
   const controlKey = required(environment, "CAREFLOOR_RUNPOD_CONTROL_API_KEY");
-  const workersMax = Number(environment.CAREFLOOR_RUNPOD_EXPECTED_WORKERS_MAX ?? "0");
-  if (![0, 1].includes(workersMax))
+  const expectedWorkersMax = environment.CAREFLOOR_RUNPOD_EXPECTED_WORKERS_MAX ?? "0";
+  const workersMax = expectedWorkersMax === "incumbent" ? undefined : Number(expectedWorkersMax);
+  if (workersMax !== undefined && ![0, 1].includes(workersMax))
     throw new Error("Carefloor RunPod serving capacity is invalid");
   const endpoints = await fetchJson("https://rest.runpod.io/v1/endpoints", "https://rest.runpod.io", controlKey, fetcher);
   if (!Array.isArray(endpoints) || endpoints.length > 10_000)
@@ -234,7 +235,10 @@ export async function verifyControlPlane(environment, fetcher = fetch, now = new
       throw new Error(`Carefloor ${kind} endpoint is not bound`);
     const template = await fetchJson(`https://rest.runpod.io/v1/templates/${endpoint.templateId}`, "https://rest.runpod.io", controlKey, fetcher);
     if (template.imageName !== image) throw new Error(`Carefloor ${kind} image binding is invalid`);
-    assertCapacity(kind, endpoint, template, workersMax);
+    const admittedWorkersMax = workersMax ?? endpoint.workersMax;
+    if (![0, 1].includes(admittedWorkersMax))
+      throw new Error(`${kind} RunPod runtime boundary is invalid`);
+    assertCapacity(kind, endpoint, template, admittedWorkersMax);
     const configurationSha256 = runpodConfigurationSha256(
       { ...endpoint, workersMin: 0, workersMax: 0 },
       template,
@@ -258,7 +262,7 @@ export async function verifyControlPlane(environment, fetcher = fetch, now = new
       image,
       configurationSha256,
       workersMin: 0,
-      workersMax,
+      workersMax: admittedWorkersMax,
       ...(kind === "jackson" ? { networkVolumeId: endpoint.networkVolumeId, ...verifyJacksonCustody(environment, endpoint, template, image) } : {}),
     }));
   }

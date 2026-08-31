@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const EXECUTOR_SHA = "053fe13b864a129baf3d76d9d76d4ee984b12440";
+const EXECUTOR_SHA = "da4791ca32ee587e7e2b230f1780086b18d5c9ea";
 
 for (const name of ["migration", "retention"]) {
   test(`${name} runs only the authority-pinned executor source`, async () => {
@@ -47,4 +47,17 @@ test("migration executor preserves the canonical expand-contract gate", async ()
     /CAREFLOOR_CANONICAL_URL: https:\/\/brainvi-carefloor\.vercel\.app/,
   );
   assert.doesNotMatch(workflow, /canonical_url:|inputs\.canonical_url/);
+});
+
+test("control-plane signing key is confined to the authority workflow", async () => {
+  const workflow = await readFile(
+    new URL("../.github/workflows/sign-carefloor-control-plane.yml", import.meta.url),
+    "utf8",
+  );
+  assert.match(workflow, /environment: carefloor-release-signing/);
+  assert.match(
+    workflow,
+    /secrets\.CAREFLOOR_CONTROL_PLANE_SIGNING_PRIVATE_KEY_PEM/,
+  );
+  assert.doesNotMatch(workflow, /actions\/checkout/);
 });
