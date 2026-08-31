@@ -14,6 +14,7 @@ on:
       b2_endpoint_url: { required: true, type: string }
       b2_region: { required: true, type: string }
       b2_bucket: { required: true, type: string }
+      heartbeat_origins: { required: true, type: string }
     secrets:
       CAREFLOOR_RETENTION_DATABASE_URL: { required: true }
       B2_RETENTION_KEY_ID: { required: true }
@@ -71,4 +72,16 @@ jobs:
           CAREFLOOR_LEDGER_RETENTION_CAPABILITY_KEY: ${{ secrets.CAREFLOOR_LEDGER_RETENTION_CAPABILITY_KEY }}
           CAREFLOOR_RETENTION_RECEIPT_PRIVATE_KEY_PEM: ${{ secrets.CAREFLOOR_RETENTION_RECEIPT_PRIVATE_KEY_PEM }}
           CAREFLOOR_RETENTION_HEARTBEAT_URL: ${{ secrets.CAREFLOOR_RETENTION_HEARTBEAT_URL }}
-        run: node --import tsx apps/watchfloor/scripts/run-carefloor-retention-worker.mjs
+          CAREFLOOR_RETENTION_HEARTBEAT_ORIGINS: ${{ inputs.heartbeat_origins }}
+        run: |
+          signal_heartbeat() {
+            CAREFLOOR_HEARTBEAT_STATE="$1" node --import tsx --input-type=module -e '
+              import { signalCarefloorOperationalHeartbeat } from "./apps/watchfloor/src/lib/carefloor-operational-heartbeat.ts";
+              await signalCarefloorOperationalHeartbeat({state:process.env.CAREFLOOR_HEARTBEAT_STATE,environment:{CAREFLOOR_OPERATIONAL_HEARTBEAT_URL:process.env.CAREFLOOR_RETENTION_HEARTBEAT_URL,CAREFLOOR_OPERATIONAL_HEARTBEAT_ORIGINS:process.env.CAREFLOOR_RETENTION_HEARTBEAT_ORIGINS}});
+            '
+          }
+          trap 'signal_heartbeat failure' ERR
+          signal_heartbeat start
+          node --import tsx apps/watchfloor/scripts/run-carefloor-retention-worker.mjs
+          signal_heartbeat success
+          trap - ERR
