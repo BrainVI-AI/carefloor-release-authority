@@ -1,0 +1,74 @@
+name: Execute Carefloor Retention
+
+on:
+  workflow_call:
+    inputs:
+      canonical_url: { required: true, type: string }
+      tenant_id: { required: true, type: string }
+      backup_retention_days: { required: true, type: string }
+      worker_batch_limits_json: { required: true, type: string }
+      ledger_retention_policy_json: { required: true, type: string }
+      ledger_retention_policy_sha256: { required: true, type: string }
+      ledger_retention_policy_signature: { required: true, type: string }
+      ledger_retention_policy_public_key_pem: { required: true, type: string }
+      b2_endpoint_url: { required: true, type: string }
+      b2_region: { required: true, type: string }
+      b2_bucket: { required: true, type: string }
+    secrets:
+      CAREFLOOR_RETENTION_DATABASE_URL: { required: true }
+      B2_RETENTION_KEY_ID: { required: true }
+      B2_RETENTION_APP_KEY: { required: true }
+      CAREFLOOR_LEDGER_PSEUDONYMIZATION_KEY: { required: true }
+      CAREFLOOR_LEDGER_RETENTION_CAPABILITY_KEY: { required: true }
+      CAREFLOOR_RETENTION_RECEIPT_PRIVATE_KEY_PEM: { required: true }
+      CAREFLOOR_RETENTION_HEARTBEAT_URL: { required: false }
+
+permissions:
+  contents: read
+
+jobs:
+  retain:
+    environment: carefloor-retention
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CAREFLOOR_EXECUTOR_SOURCE_SHA: 053fe13b864a129baf3d76d9d76d4ee984b12440
+      CAREFLOOR_CANONICAL_URL: ${{ inputs.canonical_url }}
+      NODE_ENV: production
+      CAREFLOOR_TENANT_ID: ${{ inputs.tenant_id }}
+      CAREFLOOR_BACKUP_RETENTION_DAYS: ${{ inputs.backup_retention_days }}
+      CAREFLOOR_WORKER_BATCH_LIMITS_JSON: ${{ inputs.worker_batch_limits_json }}
+      CAREFLOOR_LEDGER_RETENTION_POLICY_JSON: ${{ inputs.ledger_retention_policy_json }}
+      CAREFLOOR_LEDGER_RETENTION_POLICY_SHA256: ${{ inputs.ledger_retention_policy_sha256 }}
+      CAREFLOOR_LEDGER_RETENTION_POLICY_SIGNATURE: ${{ inputs.ledger_retention_policy_signature }}
+      CAREFLOOR_LEDGER_RETENTION_POLICY_PUBLIC_KEY_PEM: ${{ inputs.ledger_retention_policy_public_key_pem }}
+      B2_ENDPOINT_URL: ${{ inputs.b2_endpoint_url }}
+      B2_REGION: ${{ inputs.b2_region }}
+      B2_BUCKET: ${{ inputs.b2_bucket }}
+    steps:
+      - name: Bind retention executor to canonical release
+        run: |
+          SOURCE_SHA="$(node -e 'fetch(process.env.CAREFLOOR_CANONICAL_URL+"/api/version").then(async r=>{if(!r.ok)throw new Error("version unavailable");const v=await r.json();if(!/^[a-f0-9]{40}$/.test(v.gitHead??""))throw new Error("invalid source");process.stdout.write(v.gitHead)})')"
+          test "$SOURCE_SHA" = "$CAREFLOOR_EXECUTOR_SOURCE_SHA"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: BrainVI-AI/brainvi-monorepo
+          ref: ${{ env.CAREFLOOR_EXECUTOR_SOURCE_SHA }}
+      - uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2
+        with:
+          version: 10.26.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Delete expired evidence under pinned legal-hold executor
+        env:
+          CAREFLOOR_DATABASE_URL: ${{ secrets.CAREFLOOR_RETENTION_DATABASE_URL }}
+          B2_RETENTION_KEY_ID: ${{ secrets.B2_RETENTION_KEY_ID }}
+          B2_RETENTION_APP_KEY: ${{ secrets.B2_RETENTION_APP_KEY }}
+          CAREFLOOR_LEDGER_PSEUDONYMIZATION_KEY: ${{ secrets.CAREFLOOR_LEDGER_PSEUDONYMIZATION_KEY }}
+          CAREFLOOR_LEDGER_RETENTION_CAPABILITY_KEY: ${{ secrets.CAREFLOOR_LEDGER_RETENTION_CAPABILITY_KEY }}
+          CAREFLOOR_RETENTION_RECEIPT_PRIVATE_KEY_PEM: ${{ secrets.CAREFLOOR_RETENTION_RECEIPT_PRIVATE_KEY_PEM }}
+          CAREFLOOR_RETENTION_HEARTBEAT_URL: ${{ secrets.CAREFLOOR_RETENTION_HEARTBEAT_URL }}
+        run: node --import tsx apps/watchfloor/scripts/run-carefloor-retention-worker.mjs

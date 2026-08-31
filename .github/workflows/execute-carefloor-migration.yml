@@ -1,0 +1,90 @@
+name: Execute Carefloor Migration
+
+on:
+  workflow_call:
+    inputs:
+      source_sha: { required: true, type: string }
+      candidate_sha256: { required: true, type: string }
+      artifact_sha256: { required: true, type: string }
+      migration_authorization_sha256: { required: true, type: string }
+      deployment_url: { required: true, type: string }
+      authorization_receipt_base64: { required: true, type: string }
+      authorization_signature_base64: { required: true, type: string }
+      authorization_public_key_pem_base64: { required: true, type: string }
+      tenant_id: { required: true, type: string }
+      ledger_retention_policy_json: { required: true, type: string }
+      ledger_retention_policy_sha256: { required: true, type: string }
+      ledger_retention_policy_signature: { required: true, type: string }
+      ledger_retention_policy_public_key_pem: { required: true, type: string }
+    secrets:
+      CAREFLOOR_DATABASE_URL: { required: true }
+      CAREFLOOR_DATABASE_URL_UNPOOLED: { required: true }
+      CAREFLOOR_LEDGER_RETENTION_CAPABILITY_KEY: { required: true }
+
+permissions:
+  contents: read
+
+jobs:
+  migrate:
+    environment: carefloor-production-migration
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CAREFLOOR_EXECUTOR_SOURCE_SHA: 053fe13b864a129baf3d76d9d76d4ee984b12440
+      CAREFLOOR_RELEASE_SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Admit only the authority-pinned executor release
+        run: test "$CAREFLOOR_RELEASE_SOURCE_SHA" = "$CAREFLOOR_EXECUTOR_SOURCE_SHA"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: BrainVI-AI/brainvi-monorepo
+          ref: ${{ env.CAREFLOOR_EXECUTOR_SOURCE_SHA }}
+      - uses: pnpm/action-setup@fe02b34f77f8bc703788d5817da081398fad5dd2
+        with:
+          version: 10.26.2
+      - uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Verify exact independent migration authorization
+        env:
+          RECEIPT: ${{ inputs.authorization_receipt_base64 }}
+          SIGNATURE: ${{ inputs.authorization_signature_base64 }}
+          PUBLIC_KEY: ${{ inputs.authorization_public_key_pem_base64 }}
+          EXPECTED_KEY_SHA256: ${{ vars.CAREFLOOR_RELEASE_APPROVAL_PUBLIC_KEY_SHA256 }}
+          CANDIDATE_SHA256: ${{ inputs.candidate_sha256 }}
+          ARTIFACT_SHA256: ${{ inputs.artifact_sha256 }}
+          AUTHORIZATION_SHA256: ${{ inputs.migration_authorization_sha256 }}
+          DEPLOYMENT_URL: ${{ inputs.deployment_url }}
+        run: |
+          node <<'JS'
+          const {createHash,createPublicKey,verify}=require("node:crypto");
+          const raw=Buffer.from(process.env.RECEIPT,"base64"), signature=Buffer.from(process.env.SIGNATURE,"base64"), key=createPublicKey(Buffer.from(process.env.PUBLIC_KEY,"base64"));
+          if(createHash("sha256").update(key.export({type:"spki",format:"der"})).digest("hex")!==process.env.EXPECTED_KEY_SHA256||!verify(null,raw,key,signature))throw new Error("Migration authority trust failed");
+          const receipt=JSON.parse(raw), expected={schema:"brainvi.carefloor.migration-authorization.v1",sourceSha:process.env.CAREFLOOR_RELEASE_SOURCE_SHA,candidateManifestSha256:process.env.CANDIDATE_SHA256,vercelArtifactSha256:process.env.ARTIFACT_SHA256,migrationAuthorizationSha256:process.env.AUTHORIZATION_SHA256,deploymentUrl:process.env.DEPLOYMENT_URL,callerRunId:process.env.GITHUB_RUN_ID,callerRunAttempt:process.env.GITHUB_RUN_ATTEMPT};
+          for(const [field,value] of Object.entries(expected))if(String(receipt[field])!==String(value))throw new Error(`Migration authorization mismatch: ${field}`);
+          if(Date.now()>Date.parse(receipt.expiresAt)||receipt.nonce!==`${receipt.callerRunId}:${receipt.callerRunAttempt}:${receipt.migrationAuthorizationSha256}`)throw new Error("Migration authorization expired or replayed");
+          JS
+      - name: Apply pinned production migrations
+        working-directory: apps/watchfloor
+        env:
+          NODE_ENV: production
+          CAREFLOOR_TENANT_ID: ${{ inputs.tenant_id }}
+          CAREFLOOR_DATABASE_URL: ${{ secrets.CAREFLOOR_DATABASE_URL }}
+          CAREFLOOR_DATABASE_URL_UNPOOLED: ${{ secrets.CAREFLOOR_DATABASE_URL_UNPOOLED }}
+          CAREFLOOR_LEDGER_RETENTION_POLICY_JSON: ${{ inputs.ledger_retention_policy_json }}
+          CAREFLOOR_LEDGER_RETENTION_POLICY_SHA256: ${{ inputs.ledger_retention_policy_sha256 }}
+          CAREFLOOR_LEDGER_RETENTION_POLICY_SIGNATURE: ${{ inputs.ledger_retention_policy_signature }}
+          CAREFLOOR_LEDGER_RETENTION_POLICY_PUBLIC_KEY_PEM: ${{ inputs.ledger_retention_policy_public_key_pem }}
+          CAREFLOOR_LEDGER_RETENTION_CAPABILITY_KEY: ${{ secrets.CAREFLOOR_LEDGER_RETENTION_CAPABILITY_KEY }}
+        run: |
+          mkdir -p ../../artifacts/carefloor-production-release
+          node --import tsx scripts/carefloor-migrate.mjs > ../../artifacts/carefloor-production-release/migration.json
+          node --import tsx scripts/install-carefloor-ledger-retention-policy.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: carefloor-migration-${{ inputs.source_sha }}
+          path: artifacts/carefloor-production-release/migration.json
+          if-no-files-found: error
+          retention-days: 90
