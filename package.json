@@ -2,6 +2,35 @@
   "name": "carefloor-release-authority",
   "private": true,
   "dependencies": {
-    "vercel": "48.10.2"
+    "vercel": "59.10.0"
+  },
+  "overrides": {
+    "@tootallnate/once": "3.0.1",
+    "ajv": "8.20.0",
+    "js-yaml": "4.3.2",
+    "smol-toml": "1.8.0",
+    "tar": "7.5.22",
+    "undici": "6.28.0",
+    "@vercel/backends": {
+      "path-to-regexp": "8.4.2"
+    },
+    "@vercel/express": {
+      "path-to-regexp": "8.4.2"
+    },
+    "@vercel/fun": {
+      "path-to-regexp": "8.4.2"
+    },
+    "@vercel/hono": {
+      "path-to-regexp": "8.4.2"
+    },
+    "@vercel/node": {
+      "path-to-regexp": "6.3.0"
+    },
+    "@vercel/python-analysis": {
+      "minimatch": "10.2.6"
+    },
+    "@vercel/remix-builder": {
+      "path-to-regexp": "6.3.0"
+    }
   }
 }

@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           repository: BrainVI-AI/carefloor-release-authority
-          ref: AUTHORITY_TOOLING_SHA
+          ref: b455ceb36d260cdc2f2c4d92bc7259939ae4a8c5
           persist-credentials: false
       - name: Install hash-locked deploy tooling
         run: npm ci --ignore-scripts --omit=dev
@@ -95,7 +95,9 @@ jobs:
           echo "deployment_url=$DEPLOYMENT_URL" >> "$GITHUB_OUTPUT"
           echo "CAREFLOOR_DEPLOYMENT_URL=$DEPLOYMENT_URL" >> "$GITHUB_ENV"
       - name: Verify production source binding
-        run: node -e 'fetch(process.env.CAREFLOOR_DEPLOYMENT_URL+"/api/version").then(async r=>{if(!r.ok)throw new Error("version unavailable");const v=await r.json();if(v.gitHead!==process.env.CAREFLOOR_RELEASE_SOURCE_SHA||v.candidateManifestSha256!==process.env.WATCHFLOOR_CANDIDATE_MANIFEST_SHA256)throw new Error("deployment binding mismatch");require("node:fs").writeFileSync("artifacts/carefloor-production-release/deployment.json",JSON.stringify(v))})'
+        env:
+          VERCEL_AUTOMATION_BYPASS_SECRET: ${{ secrets.CAREFLOOR_VERCEL_AUTOMATION_BYPASS_SECRET }}
+        run: node -e 'fetch(process.env.CAREFLOOR_DEPLOYMENT_URL+"/api/version",{headers:{"x-vercel-protection-bypass":process.env.VERCEL_AUTOMATION_BYPASS_SECRET}}).then(async r=>{if(!r.ok)throw new Error("version unavailable");const v=await r.json();if(v.gitHead!==process.env.CAREFLOOR_RELEASE_SOURCE_SHA||v.candidateManifestSha256!==process.env.WATCHFLOOR_CANDIDATE_MANIFEST_SHA256)throw new Error("deployment binding mismatch");require("node:fs").writeFileSync("artifacts/carefloor-production-release/deployment.json",JSON.stringify(v))})'
       - name: Bind pre-migration authorization
         id: authorization
         run: |
